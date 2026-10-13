@@ -30,14 +30,22 @@ export interface RouterDeps {
   readSyncState(): Promise<SyncState>;
 }
 
-type Handler<TReq extends BackgroundRequest, T> = (req: TReq) => Promise<T>;
+/**
+ * Map a BackgroundRequest `'type'` literal to the specific union member
+ * that has that type. Lets `register('SYNC', (req) => req.reason)`
+ * type-check without an explicit cast.
+ */
+type ByType<T extends BackgroundRequest['type']> = Extract<BackgroundRequest, { type: T }>;
 
 export class BackgroundRouter {
   private readonly routes = new Map<BackgroundRequest['type'], (req: BackgroundRequest) => Promise<unknown>>();
 
   constructor(private readonly deps: RouterDeps) {}
 
-  register<TReq extends BackgroundRequest, T>(type: TReq['type'], handle: Handler<TReq, T>): this {
+  register<T extends BackgroundRequest['type'], R>(
+    type: T,
+    handle: (req: ByType<T>) => Promise<R>,
+  ): this {
     this.routes.set(type, handle as (req: BackgroundRequest) => Promise<unknown>);
     return this;
   }

@@ -64,8 +64,10 @@ export default defineBackground(() => {
   });
 
   // ---- Router -----------------------------------------------------------
-  const router = new BackgroundRouter({
-    async listBookmarks(query, folderId, limit, offset) {
+  // Build the deps object once; both the router constructor and the
+  // .register() callbacks need to call them.
+  const deps = {
+    async listBookmarks(query: string, folderId: string | undefined, limit: number, offset: number) {
       const all = await db.bookmarks.toArray();
       let rows = all;
       if (folderId) rows = rows.filter((r) => r.parentId === folderId);
@@ -94,7 +96,7 @@ export default defineBackground(() => {
         syncState,
       };
     },
-    async fullSync(reason) {
+    async fullSync(reason: 'manual' | 'startup' | 'event') {
       const r = await coordinator.fullSync(reason);
       return { count: r.count };
     },
@@ -119,7 +121,20 @@ export default defineBackground(() => {
     async readSyncState() {
       return readSyncState();
     },
-  });
+  };
+
+  // Wire every BackgroundRequest type to its handler. Without these
+  // registrations, dispatch() returns INVALID_REQUEST for every type
+  // (regression history: Phase 1 refactor originally forgot this).
+  const router = new BackgroundRouter(deps)
+    .register('BOOKMARKS_LIST', (req) => deps.listBookmarks(
+      req.query ?? '', req.folderId, req.limit ?? 200, req.offset ?? 0,
+    ))
+    .register('BOOKMARKS_TREE', () => deps.listFolders())
+    .register('STATS', () => deps.getStats())
+    .register('SYNC', (req) => deps.fullSync(req.reason ?? 'manual'))
+    .register('EXPORT', () => deps.exportBackup())
+    .register('SYNC_STATE', () => deps.readSyncState());
 
   // ---- Message handler --------------------------------------------------
   // Reject messages from other extensions.
