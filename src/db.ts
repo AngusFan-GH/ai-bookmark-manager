@@ -1,15 +1,6 @@
-import Dexie, { type Table } from 'dexie';
-import type { BookmarkRow, SyncMeta } from './types';
+// src/db.ts
+//
+// Backward-compatible re-export. Phase 1 moved the schema into
+// `src/infrastructure/database/db.ts`. Old imports keep working.
 
-export class BookmarkDatabase extends Dexie {
-  bookmarks!: Table<BookmarkRow, string>;
-  meta!: Table<SyncMeta, string>;
-  constructor() {
-    super('ai-bookmark-manager');
-    this.version(1).stores({
-      bookmarks: 'id, parentId, kind, title, url, path, updatedAt',
-      meta: 'key',
-    });
-  }
-}
-export const db = new BookmarkDatabase();
+export { db, readSyncState, writeSyncState } from './infrastructure/database/db';

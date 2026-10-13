@@ -25,11 +25,19 @@
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/chrome": "^0.0.300",
+    "@typescript-eslint/eslint-plugin": "^8.71.2",
+    "@typescript-eslint/parser": "^8.71.2",
     "@vitejs/plugin-vue": "^5.2.1",
+    "eslint": "^10.12.0",
+    "eslint-plugin-vue": "^10.11.1",
+    "fake-indexeddb": "^6.2.5",
+    "happy-dom": "^15.11.7",
     "typescript": "^5.8.2",
     "vite": "^6.2.1",
     "vitest": "^3.0.8",
+    "vue-eslint-parser": "^10.4.1",
     "vue-tsc": "^2.2.8",
     "wxt": "^0.20.0"
   }

@@ -4,12 +4,14 @@ Local-first Chrome/Edge bookmark indexing extension. **Read-only for native book
 
 ## Development Stage
 
-This project follows a 7-phase development plan. **Current stage: Phase 0 — Audit & Quality Baseline** (passed).
+This project follows a 7-phase development plan.
+
+- **Phase 0 — Audit & Quality Baseline** ✅ passed ([report](./docs/audit-phase0.md))
+- **Phase 1 — Bookmark data + UI** ✅ passed ([report](./docs/phase-1-report.md), [data model](./docs/data-model.md))
 
 The contract that all subsequent agents follow is in [`docs/DEVELOPMENT_GUIDE.md`](./docs/DEVELOPMENT_GUIDE.md).
-The detailed Phase 0 audit report is in [`docs/audit-phase0.md`](./docs/audit-phase0.md).
 
-Do not start Phase 1 work until the development guide's stop conditions are reviewed and the Phase 0 audit is accepted.
+Do not start Phase 2 work until the development guide's stop conditions are reviewed and the Phase 1 report is accepted.
 
 ## Requirements
 
@@ -58,13 +60,13 @@ npm run dev:clean         # wipe .wxt/ + .output/ and re-prepare, then start
 
 ```bash
 npm run typecheck   # vue-tsc with WXT-generated tsconfig
-npm run test        # vitest
+npm run test        # vitest (49 tests; 10,000-bookmark stress included)
 npm run build       # production MV3 build → .output/chrome-mv3/
 npm run zip         # zip for store upload
-npm run lint        # placeholder (eslint config scheduled for Phase 1)
+npm run lint        # ESLint flat-config (TypeScript + Vue)
 ```
 
-All four required commands (`typecheck`, `test`, `build`, plus `dev`) are exercised by Phase 0 and must remain green.
+All five required commands (`typecheck`, `test`, `build`, `lint`, plus `dev`) are exercised by Phase 1 and must remain green.
 
 ## Iteration 1 features
 

@@ -3,13 +3,22 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useBookmarkStore } from '../../src/store';
 import { request } from '../../src/client';
+import type { FolderRecord } from '../../src/domain/bookmarks/types';
+
 const store = useBookmarkStore();
 const query = ref('');
 const folderId = ref('');
 const page = ref(1);
 const syncing = ref(false);
 let debounce: ReturnType<typeof setTimeout> | undefined;
-const folders = computed(() => store.folders.filter(x => x.title && x.id !== '0').sort((a,b) => a.path.localeCompare(b.path) || a.title.localeCompare(b.title)));
+const folders = computed(() =>
+  store.folders
+    .filter((x: FolderRecord) => x.title && x.id !== '0')
+    .sort((a: FolderRecord, b: FolderRecord) => a.path.localeCompare(b.path) || a.title.localeCompare(b.title)),
+);
+let reqSeq = 0;
+const reqId = (): string => `r${Date.now().toString(36)}_${(++reqSeq).toString(36)}`;
+
 async function refresh() { await store.load(query.value, folderId.value || undefined, (page.value - 1) * 200); }
 watch([query, folderId], () => { page.value = 1; if (debounce) clearTimeout(debounce); debounce = setTimeout(() => void refresh(), 200); });
 watch(page, () => void refresh());
@@ -21,7 +30,7 @@ async function sync() {
 }
 async function backup() {
   try {
-    const data = await request<unknown>({ type: 'EXPORT' });
+    const data = await request<unknown>({ type: 'EXPORT', requestId: reqId() });
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
     const a = document.createElement('a'); a.href = url;
     a.download = `bookmarks-backup-${new Date().toISOString().slice(0, 10)}.json`;
