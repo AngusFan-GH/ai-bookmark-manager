@@ -341,9 +341,24 @@ export default defineBackground(() => {
   // Service-worker teardown: best-effort flush of any pending debounced sync.
   // MV3 may not run this in all shutdowns (dev guide § 2.1); the worst case
   // is a missed event, which the next onStartup full sync will catch up.
-   
+
   (self as any).addEventListener('unload', () => {
     unsubscribe();
     void debouncer.flush();
   });
+
+  // ---- Custom commands (Phase 3+) --------------------------------------
+  // `open-link-health` (Alt+H by default) opens the Options page
+  // with the link-health tab pre-selected via URL hash.
+  try {
+    chrome.commands?.onCommand?.addListener((command) => {
+      if (command === 'open-link-health') {
+        const url = chrome.runtime.getURL('options.html#health');
+        void chrome.tabs.create({ url });
+      }
+    });
+  } catch {
+    // Older Chrome / non-MV3 builds may not expose chrome.commands.
+    // Fail silently — the popup + hash deep link still work.
+  }
 });

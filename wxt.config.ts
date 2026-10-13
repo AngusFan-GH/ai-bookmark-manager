@@ -33,5 +33,15 @@ export default defineConfig({
     version: '0.1.0',
     permissions: ['bookmarks', 'storage'],
     action: { default_title: 'AI Bookmark Manager' },
+    // `commands` here augments WXT's defaults. We want the user to be
+    // able to jump to the link-health tab with a single keyboard
+    // shortcut. Alt+H is the proposed default (Alt+R is reserved by
+    // WXT for "reload extension during development").
+    commands: {
+      'open-link-health': {
+        suggested_key: { default: 'Alt+H' },
+        description: 'Open link-health view',
+      },
+    },
   },
 });

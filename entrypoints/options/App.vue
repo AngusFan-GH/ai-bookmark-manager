@@ -7,12 +7,15 @@ import type { FolderRecord } from '../../src/domain/bookmarks/types';
 import ImportFlow from './components/ImportFlow.vue';
 import HealthView from './components/HealthView.vue';
 
+type TabName = 'bookmarks' | 'health';
+const VALID_TABS: TabName[] = ['bookmarks', 'health'];
+
 const store = useBookmarkStore();
 const query = ref('');
 const folderId = ref('');
 const page = ref(1);
 const syncing = ref(false);
-const activeTab = ref<'bookmarks' | 'health'>('bookmarks');
+const activeTab = ref<TabName>('bookmarks');
 let debounce: ReturnType<typeof setTimeout> | undefined;
 const folders = computed(() =>
   store.folders
@@ -21,6 +24,26 @@ const folders = computed(() =>
 );
 let reqSeq = 0;
 const reqId = (): string => `r${Date.now().toString(36)}_${(++reqSeq).toString(36)}`;
+
+/**
+ * Open the page at chrome-extension://<id>/options.html#health and
+ * the link health tab is selected on mount and stays in sync with
+ * the URL hash. This lets the user bookmark or link to a specific
+ * view, and lets commands / context-menu entries navigate to it.
+ */
+function tabFromHash(): TabName {
+  const raw = (typeof window !== 'undefined' ? window.location.hash : '').replace(/^#/, '').toLowerCase();
+  return (VALID_TABS as string[]).includes(raw) ? (raw as TabName) : 'bookmarks';
+}
+function syncHash() {
+  if (typeof window === 'undefined') return;
+  const target = `#${activeTab.value}`;
+  if (window.location.hash !== target) {
+    // Use replaceState to avoid spamming browser history with every
+    // tab switch — only the first navigation should be in history.
+    window.history.replaceState(null, '', `${window.location.pathname}${target}`);
+  }
+}
 
 async function refresh() { await store.load(query.value, folderId.value || undefined, (page.value - 1) * 200); }
 watch([query, folderId], () => { page.value = 1; if (debounce) clearTimeout(debounce); debounce = setTimeout(() => void refresh(), 200); });
@@ -42,6 +65,14 @@ async function backup() {
   } catch (e) { ElMessage.error(String(e)); }
 }
 onMounted(async () => {
+  // Honor the URL hash on first paint so deep links open the right
+  // tab. The hash listener below keeps it in sync after that.
+  activeTab.value = tabFromHash();
+  syncHash();
+  window.addEventListener('hashchange', () => { activeTab.value = tabFromHash(); });
+  // Keep the URL hash in sync when the user clicks a tab in the UI.
+  watch(activeTab, syncHash);
+
   await refresh();
   if (!store.stats.lastSync) await sync();
   // Lightweight UI refresh; native browser bookmark changes remain authoritative.
@@ -55,6 +86,10 @@ onMounted(async () => {
         <el-button :loading="syncing" @click="sync">重新同步</el-button>
         <el-button @click="backup">导出 JSON 备份</el-button>
         <ImportFlow />
+        <el-button
+          :type="activeTab === 'health' ? 'primary' : 'default'"
+          @click="activeTab = 'health'"
+        >链接健康</el-button>
       </div>
     </header>
     <div class="stats">
