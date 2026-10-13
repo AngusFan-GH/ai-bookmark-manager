@@ -1,6 +1,33 @@
 {
-  "name": "ai-bookmark-manager", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": {"dev": "wxt", "build": "wxt build", "zip": "wxt zip", "typecheck": "vue-tsc --noEmit -p tsconfig.json", "test": "vitest run"},
-  "dependencies": {"@element-plus/icons-vue": "^2.3.1", "dexie": "^4.0.11", "element-plus": "^2.9.5", "pinia": "^3.0.1", "vue": "^3.5.13"},
-  "devDependencies": {"@types/chrome": "^0.0.300", "@vitejs/plugin-vue": "^5.2.1", "typescript": "^5.8.2", "vite": "^6.2.1", "vitest": "^3.0.8", "vue-tsc": "^2.2.8", "wxt": "^0.20.0"}
+  "name": "ai-bookmark-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first Chrome/Edge bookmark indexing extension (read-only for native bookmarks).",
+  "scripts": {
+    "postinstall": "wxt prepare",
+    "dev": "wxt prepare && wxt",
+    "build": "wxt prepare && wxt build",
+    "zip": "wxt prepare && wxt zip",
+    "typecheck": "wxt prepare && vue-tsc --noEmit -p tsconfig.json",
+    "test": "wxt prepare && vitest run",
+    "lint": "eslint . --ext .ts,.vue",
+    "lint:fix": "eslint . --ext .ts,.vue --fix"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "dexie": "^4.0.11",
+    "element-plus": "^2.9.5",
+    "pinia": "^3.0.1",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.300",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.1",
+    "vitest": "^3.0.8",
+    "vue-tsc": "^2.2.8",
+    "wxt": "^0.20.0"
+  }
 }
