@@ -64,13 +64,93 @@ export type ExportRequest = { type: 'EXPORT'; requestId: string };
 
 export type SyncStateRequest = { type: 'SYNC_STATE'; requestId: string };
 
+// ---- Phase 2: backup import / plan / execute -----------------------------
+
+export interface ImportPreview {
+  formatVersion: number;
+  totalNodes: number;
+  mode: 'additive' | 'additive-with-meta' | 'controlled-merge';
+  summary: {
+    adds: number;
+    updates: number;
+    moves: number;
+    deletes: number;
+    noops: number;
+  };
+  conflicts: string[];
+  /** First 50 ops for preview rendering. */
+  sample: unknown[];
+  /** Sanity-check the payload passed all schema and size rules. */
+  ok: true;
+}
+
+export type ImportPreviewRequest = {
+  type: 'IMPORT_PREVIEW';
+  requestId: string;
+  rawJson: string;
+  mode: 'additive' | 'additive-with-meta' | 'controlled-merge';
+};
+
+export type PlanDraftRequest = {
+  type: 'PLAN_DRAFT';
+  requestId: string;
+  rawJson: string;
+  mode: 'additive' | 'additive-with-meta' | 'controlled-merge';
+};
+
+export interface PlanSummary {
+  planId: string;
+  status: string;
+  title: string;
+  stepCount: number;
+  createdAt: number;
+}
+
+export type PlanListRequest = { type: 'PLAN_LIST'; requestId: string };
+export type PlanGetRequest = { type: 'PLAN_GET'; requestId: string; planId: string };
+
+export type ApprovalRequest = {
+  type: 'APPROVE';
+  requestId: string;
+  planId: string;
+  ttlMs?: number;
+};
+
+export interface ApprovalToken {
+  token: string;
+  planId: string;
+  expiresAt: number;
+}
+
+export type ExecuteRequest = {
+  type: 'EXECUTE';
+  requestId: string;
+  planId: string;
+  approvalToken: string;
+  dryRun?: boolean;
+};
+
+export interface ExecuteResultMsg {
+  planId: string;
+  status: string;
+  succeeded: number;
+  failed: number;
+  compensated: number;
+}
+
 export type BackgroundRequest =
   | BookmarkListRequest
   | BookmarkTreeRequest
   | StatsRequest
   | SyncRequest
   | ExportRequest
-  | SyncStateRequest;
+  | SyncStateRequest
+  | ImportPreviewRequest
+  | PlanDraftRequest
+  | PlanListRequest
+  | PlanGetRequest
+  | ApprovalRequest
+  | ExecuteRequest;
 
 // ---- Responses ------------------------------------------------------------
 

@@ -1,13 +1,19 @@
 // src/infrastructure/database/db.ts
 //
-// Dexie schema v1. Mirrors dev guide § 4.1 for the stores we need in
-// Phase 1: `bookmarks`, `folders`, `meta`. Other stores (linkChecks,
-// contents, classifications, plans, ...) are introduced by later
-// phases and added as new schema versions in `migrations.ts`.
+// Dexie schema. v1 from Phase 1 (bookmarks / folders / meta). v2 from
+// Phase 2 (plans / operationSteps / snapshots / audit).
+//
+// All other stores (linkChecks, contents, classifications, etc.) are
+// added by later phases and bump the schema version in migrations.ts.
 
 import Dexie, { type Table } from 'dexie';
-import type { BookmarkRecord, FolderRecord } from '../../domain/bookmarks/types';
-import type { SyncState } from '../../domain/bookmarks/types';
+import type { BookmarkRecord, FolderRecord, SyncState } from '../../domain/bookmarks/types';
+import type {
+  OperationPlan,
+  OperationStep,
+  TreeSnapshot,
+  OperationAuditEntry,
+} from '../../domain/operations/types';
 
 export interface MetaRecord {
   key: string;
@@ -19,16 +25,33 @@ export class BookmarkDatabase extends Dexie {
   bookmarks!: Table<BookmarkRecord, string>;
   folders!: Table<FolderRecord, string>;
   meta!: Table<MetaRecord, string>;
+  // Phase 2 stores
+  plans!: Table<OperationPlan, string>;
+  operationSteps!: Table<OperationStep, string>;
+  snapshots!: Table<TreeSnapshot, string>;
+  audit!: Table<OperationAuditEntry, string>;
 
   constructor(name = 'ai-bookmark-manager') {
     super(name);
-    // Schema v1. Indexes match dev guide § 4.1 for the stores we use now.
-    // String indexes are case-sensitive; we normalize search client-side.
+    // v1: bookmarks / folders / meta.
     this.version(1).stores({
       bookmarks:
         'id, browserId, parentId, kind, title, url, [parentId+index], updatedAt, syncGeneration',
       folders: 'id, browserId, parentId, title, [parentId+index], updatedAt, syncGeneration',
       meta: 'key, updatedAt',
+    });
+    // v2: + plans / operationSteps / snapshots / audit.
+    // Schema upgrades are additive in Dexie — no .upgrade() body needed
+    // when only adding new tables.
+    this.version(2).stores({
+      bookmarks:
+        'id, browserId, parentId, kind, title, url, [parentId+index], updatedAt, syncGeneration',
+      folders: 'id, browserId, parentId, title, [parentId+index], updatedAt, syncGeneration',
+      meta: 'key, updatedAt',
+      plans: 'id, status, createdAt, basedOnGeneration',
+      operationSteps: 'id, planId, status, targetBrowserId, [planId+order]',
+      snapshots: 'id, planId, createdAt, syncGeneration',
+      audit: 'id, planId, stepId, recordedAt',
     });
   }
 }

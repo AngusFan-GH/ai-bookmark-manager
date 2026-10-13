@@ -23,6 +23,13 @@ const deps = () => ({
   fullSync: vi.fn().mockResolvedValue({ count: 7 }),
   exportBackup: vi.fn().mockResolvedValue({ formatVersion: 1 }),
   readSyncState: vi.fn().mockResolvedValue({ status: 'idle', lastSyncAt: null, lastError: null, count: 0, generation: 0 }),
+  // Phase 2 — kept as vi.fn so the regression test can update them.
+  previewImport: vi.fn().mockResolvedValue({ ok: true, summary: { adds: 0, updates: 0, moves: 0, deletes: 0, noops: 0 }, conflicts: [], sample: [], totalNodes: 0, formatVersion: 1, mode: 'additive' }),
+  draftPlan: vi.fn().mockResolvedValue({ id: 'plan-1', status: 'draft', title: 'p', stepCount: 0, createdAt: 0 }),
+  approvePlan: vi.fn().mockResolvedValue({ token: 'tok', planId: 'p', expiresAt: 0 }),
+  executePlan: vi.fn().mockResolvedValue({ planId: 'p', status: 'completed', succeeded: 0, failed: 0, compensated: 0 }),
+  listPlans: vi.fn().mockResolvedValue([]),
+  getPlan: vi.fn().mockResolvedValue({ id: 'p', steps: [], status: 'draft' }),
 });
 
 /**
@@ -39,7 +46,13 @@ function wireLikeBackground(d: ReturnType<typeof deps>): BackgroundRouter {
     .register('STATS', () => d.getStats())
     .register('SYNC', (req) => d.fullSync(req.reason ?? 'manual'))
     .register('EXPORT', () => d.exportBackup())
-    .register('SYNC_STATE', () => d.readSyncState());
+    .register('SYNC_STATE', () => d.readSyncState())
+    .register('IMPORT_PREVIEW', (req) => d.previewImport(req.rawJson, req.mode))
+    .register('PLAN_DRAFT', (req) => d.draftPlan(req.rawJson, req.mode))
+    .register('PLAN_LIST', () => d.listPlans())
+    .register('PLAN_GET', (req) => d.getPlan(req.planId))
+    .register('APPROVE', (req) => d.approvePlan(req.planId, req.ttlMs))
+    .register('EXECUTE', (req) => d.executePlan(req.planId, req.approvalToken, req.dryRun));
 }
 
 describe('BackgroundRouter', () => {
@@ -125,6 +138,12 @@ describe('BackgroundRouter — background.ts wiring regression', () => {
       'SYNC',
       'EXPORT',
       'SYNC_STATE',
+      'IMPORT_PREVIEW',
+      'PLAN_DRAFT',
+      'PLAN_LIST',
+      'PLAN_GET',
+      'APPROVE',
+      'EXECUTE',
     ];
 
     for (const t of types) {

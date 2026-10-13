@@ -28,6 +28,13 @@ export interface RouterDeps {
   fullSync(reason: 'manual' | 'startup' | 'event'): Promise<{ count: number }>;
   exportBackup(): Promise<ExportPayload>;
   readSyncState(): Promise<SyncState>;
+  // Phase 2: backup import + plan execution
+  previewImport(rawJson: string, mode: 'additive' | 'additive-with-meta' | 'controlled-merge'): Promise<unknown>;
+  draftPlan(rawJson: string, mode: 'additive' | 'additive-with-meta' | 'controlled-merge', title?: string): Promise<unknown>;
+  approvePlan(planId: string, ttlMs?: number): Promise<{ token: string; planId: string; expiresAt: number }>;
+  executePlan(planId: string, token: string, dryRun?: boolean): Promise<{ planId: string; status: string; succeeded: number; failed: number; compensated: number }>;
+  listPlans(): Promise<unknown[]>;
+  getPlan(planId: string): Promise<unknown>;
 }
 
 /**

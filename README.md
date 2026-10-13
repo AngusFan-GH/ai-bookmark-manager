@@ -8,10 +8,11 @@ This project follows a 7-phase development plan.
 
 - **Phase 0 — Audit & Quality Baseline** ✅ passed ([report](./docs/audit-phase0.md))
 - **Phase 1 — Bookmark data + UI** ✅ passed ([report](./docs/phase-1-report.md), [data model](./docs/data-model.md))
+- **Phase 2 — Backup + safe write executor** ✅ passed ([report](./docs/phase-2-report.md), [security notes](./docs/security.md))
 
 The contract that all subsequent agents follow is in [`docs/DEVELOPMENT_GUIDE.md`](./docs/DEVELOPMENT_GUIDE.md).
 
-Do not start Phase 2 work until the development guide's stop conditions are reviewed and the Phase 1 report is accepted.
+Do not start Phase 3 work until the development guide's stop conditions are reviewed and the Phase 2 report is accepted.
 
 ## Requirements
 

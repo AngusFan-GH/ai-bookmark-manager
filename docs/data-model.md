@@ -5,17 +5,26 @@
 > (the canonical `bookmarks` + `folders` stores, the `meta.syncState`
 > row, and the `syncGeneration` per-row counter).
 
-## 1. Stores (Dexie schema v1)
+## 1. Stores (Dexie schema v2)
 
-| store      | primary key | indexes                                                                                              | contents              |
-| ---------- | ----------- | ---------------------------------------------------------------------------------------------------- | --------------------- |
-| `bookmarks` | `id`        | `browserId, parentId, kind, title, url, [parentId+index], updatedAt, syncGeneration`               | bookmark row mirror   |
-| `folders`   | `id`        | `browserId, parentId, title, [parentId+index], updatedAt, syncGeneration`                          | folder row mirror     |
-| `meta`      | `key`       | `updatedAt`                                                                                          | misc singleton rows   |
+| store      | primary key | indexes                                                                                              | contents              | phase |
+| ---------- | ----------- | ---------------------------------------------------------------------------------------------------- | --------------------- | ----- |
+| `bookmarks` | `id`        | `browserId, parentId, kind, title, url, [parentId+index], updatedAt, syncGeneration`               | bookmark row mirror   | 1 |
+| `folders`   | `id`        | `browserId, parentId, title, [parentId+index], updatedAt, syncGeneration`                          | folder row mirror     | 1 |
+| `meta`      | `key`       | `updatedAt`                                                                                          | misc singleton rows   | 1 |
+| `plans`     | `id`        | `status, createdAt, basedOnGeneration`                                                              | `OperationPlan` rows  | 2 |
+| `operationSteps` | `id` | `planId, status, targetBrowserId, [planId+order]`                                                  | `OperationStep` rows  | 2 |
+| `snapshots` | `id`        | `planId, createdAt, syncGeneration`                                                                  | `TreeSnapshot` rows   | 2 |
+| `audit`     | `id`        | `planId, stepId, recordedAt`                                                                          | append-only audit log | 2 |
 
-Future stores (linkChecks, contents, classifications, plans, snapshots,
-tasks, settings, chatSessions, chatMessages) are added in their
-respective phases via `migrations.ts` and bump the schema version.
+Future stores (linkChecks, contents, classifications, tasks,
+settings, chatSessions, chatMessages) are added in their respective
+phases via `migrations.ts` and bump the schema version.
+
+The v1 → v2 migration is purely additive (no `.upgrade()` body is
+needed when only adding tables). Dexie handles the upgrade
+automatically. `tests/integration/migrations.test.ts` round-trips a
+v1 DB through the v2 open path to confirm bookmarks persist.
 
 ## 2. Types
 
