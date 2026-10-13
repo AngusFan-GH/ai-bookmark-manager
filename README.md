@@ -19,11 +19,40 @@ Do not start Phase 1 work until the development guide's stop conditions are revi
 ## Quick start
 
 ```bash
-npm install      # postinstall will run `wxt prepare`
-npm run dev      # http://localhost:3000 with HMR
+npm install                  # postinstall will run `wxt prepare`
+npm run dev                  # starts the HMR dev server on http://localhost:3000
 ```
 
-The dev server pre-renders the unpacked extension into `.output/chrome-mv3-dev/`. Load that directory in `chrome://extensions` (Developer mode → "Load unpacked"). Click the extension icon and open the manager.
+The dev server pre-renders the unpacked extension into `.output/chrome-mv3-dev/`.
+
+### Loading the extension into your real Chrome (so it can read your bookmarks)
+
+WXT's `npm run dev` automatically opens a **temporary Chrome window** with a fresh, isolated profile. That window has none of your real bookmarks and is only useful for quick visual checks.
+
+To develop against your real bookmarks, load the extension into your **normal** Chrome:
+
+1. Start the dev server: `npm run dev` — leave it running.
+2. In **your normal Chrome** (the one with all your bookmarks), open `chrome://extensions`.
+3. Toggle **Developer mode** (top-right).
+4. Click **Load unpacked** and select:
+   ```
+   /Users/angusfan/Desktop/ai-bookmark-manager/.output/chrome-mv3-dev/
+   ```
+5. Pin the extension (puzzle icon → pin) and click its icon → "打开书签管理中心".
+
+HMR is active. When you save any `.ts` / `.vue` / `.css` file, the dev server pushes a reload signal to the extension. If the page does not refresh, click the **↻ Reload** button on the extension card in `chrome://extensions`.
+
+Convenience scripts:
+
+```bash
+npm run open:chrome-ext   # open chrome://extensions in your default browser
+npm run open:devdir       # open the .output/chrome-mv3-dev/ folder in Finder
+npm run dev:clean         # wipe .wxt/ + .output/ and re-prepare, then start
+```
+
+### Why the temp Chrome window?
+
+`wxt dev` is wired to `web-ext-run`, which always launches a fresh Chromium with a temporary profile in `/var/folders/.../tmp-web-ext--*/Default/`. WXT 0.20 does not expose a CLI flag to skip this. Closing that temp window is harmless — it is not where the extension lives during development. See `wxt.config.ts` for details.
 
 ## Quality gates
 

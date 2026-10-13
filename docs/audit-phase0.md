@@ -242,10 +242,40 @@ WXT 0.20.27
 - ✅ 无远程脚本、CSP 由 WXT 默认
 - ✅ 全量同步在单一 IndexedDB 事务内完成（`src/sync.ts:11-16`）
 
+### 5.4 启动方式与书签隔离（已修复 ISS-0）
+
+**问题**：首次运行 `npm run dev` 时，WXT 会自动调用 `web-ext-run` 启动一个临时 Chrome 实例。该实例使用 `/var/folders/.../tmp-web-ext--*/Default/` 下的**临时隔离 Profile**，与开发者日常使用的 Chrome Profile 完全分离。临时 Profile 中没有 `Bookmarks` 文件，因此扩展读不到任何书签。
+
+**根因**：
+- `wxt 0.20.27` 的 CLI 不提供 `--no-open` 之类的开关
+- `.webextrc` 的 `disabled: true` 只影响 WXT 启动时打印的"按 o 重开浏览器"提示文本，**不会阻止 `web-ext-run` 启动**
+- `web-ext-run` 自身也没有 `disabled` 字段
+
+**已采取的修复**（保持 wxt.config.ts 最简、可读）：
+1. `wxt.config.ts` 用 `defineWebExtConfig({ binaries: { chrome: '...' } })` 把 web-ext-run 用的 Chromium 二进制固定为系统 Chrome，避免它去别处找一个奇怪的 Chrome。
+2. 在 `package.json` 增加 `open:chrome-ext` 脚本（用 `osascript` 调起系统默认的 Google Chrome 并打开 `chrome://extensions`）。
+3. 在 `package.json` 增加 `open:devdir` 脚本（在 Finder 中打开 `.output/chrome-mv3-dev/`）。
+4. `README.md` 新增"Loading the extension into your real Chrome"小节，提示开发者关闭临时窗口、到自己的 Chrome 里手动 Load unpacked。
+
+**未做**（已记录，留给阶段 1 评估是否要做脚本自动化加载）：
+- 用 AppleScript 把 `.output/chrome-mv3-dev/` 直接拖进当前 Chrome 的 extensions 列表（需更高权限且 brittle，不建议做）
+
+**当前开发者工作流**（已文档化在 README）：
+```
+npm run dev            # 启动 HMR 服务器 + web-ext-run 临时 Chrome（忽略它）
+# 在你自己的 Chrome 中：
+npm run open:chrome-ext   # 跳到 chrome://extensions
+# → 启用"开发者模式" → 加载已解压的扩展程序
+# → 选择 /Users/angusfan/Desktop/ai-bookmark-manager/.output/chrome-mv3-dev/
+```
+
+**验证**：本审计运行后，临时 Chrome Profile 路径确认为 `/var/folders/.../tmp-web-ext--*/Default/`，其下不存在 `Bookmarks` 文件（已用 `ls` 确认）；本机真实 Chrome Profile `~/Library/Application Support/Google/Chrome/Default/Bookmarks` 大小 467380 字节，包含真实书签。
+
 ## 6. 未解决 / 留给阶段 1+ 的事项
 
 | 编号 | 描述 | 计划阶段 |
 |---|---|---|
+| ISS-0 | `wxt dev` 自动启动临时 Chrome（无书签） | 已记录（§ 5.4） |
 | ISS-1 | 测试覆盖率仅 2 用例（仅 normalize） | 阶段 1（同步、树扁平化、ID 映射等） |
 | ISS-2 | 无 ESLint / Prettier 实际依赖与配置 | 阶段 1 引入 |
 | ISS-3 | 无 CI 工作流（GitHub Actions） | 阶段 1 引入 |

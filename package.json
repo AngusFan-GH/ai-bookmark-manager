@@ -7,6 +7,9 @@
   "scripts": {
     "postinstall": "wxt prepare",
     "dev": "wxt prepare && wxt",
+    "dev:clean": "wxt clean && wxt prepare && wxt",
+    "open:chrome-ext": "osascript -e 'tell application \"Google Chrome\" to open location \"chrome://extensions\"' -e 'tell application \"Google Chrome\" to activate'",
+    "open:devdir": "open .output/chrome-mv3-dev",
     "build": "wxt prepare && wxt build",
     "zip": "wxt prepare && wxt zip",
     "typecheck": "wxt prepare && vue-tsc --noEmit -p tsconfig.json",
