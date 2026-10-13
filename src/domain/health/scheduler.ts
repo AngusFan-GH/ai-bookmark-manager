@@ -8,13 +8,14 @@
 //   - Retry-After honoring: when a check returns rate_limited, the
 //     scheduler pauses that host until the Retry-After window elapses
 //   - Pause / resume / cancel for the user
-//   - Persistent lease: if the service worker is killed mid-scan, a
-//     fresh launch resumes from the persisted cursor
+//   - In-memory queue: a service-worker restart ends the current scan;
+//     callers must report this limitation rather than claiming recovery.
 //
 // This module is pure orchestration: it does not perform the actual
 // HTTP request (that's FetchClient) and does not classify the result
 // (that's HealthClassifier). It owns ordering, concurrency, retries,
-// and lease bookkeeping.
+// and ephemeral task bookkeeping. It intentionally does not claim to survive
+// an MV3 service-worker restart; a persisted job queue is future work.
 
 import type { LinkCheckRecord, LinkStatus } from './types';
 
@@ -38,7 +39,7 @@ export interface SchedulerAttemptResult {
 
 export interface SchedulerDeps {
   /** Run one probe and return the result. */
-  probe(bookmarkId: string, url: string, signal: AbortSignal): Promise<SchedulerAttemptResult>;
+  probe(bookmarkId: string, url: string, attempt: number, signal: AbortSignal): Promise<SchedulerAttemptResult>;
   /** Persist the new check record. */
   saveCheck(rec: LinkCheckRecord): Promise<void>;
   /** Wall-clock. */
@@ -64,6 +65,7 @@ interface InternalState {
   cancelled: Set<string>; // bookmarkIds explicitly cancelled
   /** per-item abort controllers, indexed by bookmarkId */
   itemAborters: Map<string, AbortController>;
+  active: Map<string, string>; // bookmarkId → URL, for live UI progress
 }
 
 export class TaskScheduler {
@@ -75,9 +77,11 @@ export class TaskScheduler {
     inflightTotal: 0,
     cancelled: new Set(),
     itemAborters: new Map(),
+    active: new Map(),
   };
-  private ac = new AbortController();
   private drainPromise: Promise<void> | null = null;
+  private paused = false;
+  private wakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly deps: SchedulerDeps) {}
 
@@ -93,21 +97,34 @@ export class TaskScheduler {
     return added;
   }
 
-  pause(): void { this.deps.isPaused = () => true; }
-  resume(): void { this.deps.isPaused = () => false; this.kick(); }
+  pause(): void { this.paused = true; }
+  resume(): void { this.paused = false; this.kick(); }
   cancel(bookmarkId: string): void {
     this.state.cancelled.add(bookmarkId);
     const ac = this.state.itemAborters.get(bookmarkId);
     if (ac) ac.abort();
   }
-  cancelAll(): void { this.ac.abort(); this.state.cancelled.clear(); for (const ac of this.state.itemAborters.values()) ac.abort(); }
+  cancelAll(): void {
+    // Cancel both running and not-yet-started probes. Previously only active
+    // AbortControllers were stopped, so queued items resumed after a cancel.
+    for (const item of this.state.queue) this.state.cancelled.add(item.bookmarkId);
+    this.state.queue = [];
+    if (this.wakeTimer) clearTimeout(this.wakeTimer);
+    this.wakeTimer = null;
+    for (const [bookmarkId, ac] of this.state.itemAborters) {
+      this.state.cancelled.add(bookmarkId);
+      ac.abort();
+    }
+  }
 
   /** Returns the ids currently waiting or running. */
-  status(): { queued: number; inflight: number; cancelled: number } {
+  status(): { queued: number; inflight: number; cancelled: number; active: Array<{ bookmarkId: string; url: string }>; nextEligibleAt: number | null } {
     return {
       queued: this.state.queue.length,
       inflight: this.state.inflight.size,
       cancelled: this.state.cancelled.size,
+      active: Array.from(this.state.active, ([bookmarkId, url]) => ({ bookmarkId, url })),
+      nextEligibleAt: this.nextEligibleAt(),
     };
   }
 
@@ -124,10 +141,13 @@ export class TaskScheduler {
   }
 
   private kick(): void {
-    if (this.deps.isPaused()) return;
+    if (this.paused || this.deps.isPaused()) return;
     while (this.state.inflightTotal < this.deps.globalConcurrency) {
       const next = this.take();
-      if (!next) return;
+      if (!next) {
+        this.scheduleWake();
+        return;
+      }
       this.runOne(next);
     }
   }
@@ -138,7 +158,8 @@ export class TaskScheduler {
    */
   private take(): SchedulerInputItem | null {
     const now = this.deps.now();
-    while (this.state.queue.length > 0) {
+    const candidates = this.state.queue.length;
+    for (let checked = 0; checked < candidates; checked += 1) {
       const it = this.state.queue.shift()!;
       if (this.state.cancelled.has(it.bookmarkId)) continue;
       const host = hostOf(it.url);
@@ -148,11 +169,30 @@ export class TaskScheduler {
       if (hostCount >= this.deps.perHostConcurrency) {
         // Re-queue for later; the host is at capacity.
         this.state.queue.push(it);
-        return null;
+        continue;
       }
       return it;
     }
     return null;
+  }
+
+  private nextEligibleAt(): number | null {
+    let earliest: number | null = null;
+    for (const item of this.state.queue) {
+      const gate = this.state.hostGate.get(hostOf(item.url)) ?? 0;
+      if (gate > this.deps.now() && (earliest == null || gate < earliest)) earliest = gate;
+    }
+    return earliest;
+  }
+
+  /** Wake the queue after the earliest Retry-After gate. */
+  private scheduleWake(): void {
+    const at = this.nextEligibleAt();
+    if (at == null || this.wakeTimer || this.paused || this.deps.isPaused()) return;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = null;
+      this.kick();
+    }, Math.max(0, at - this.deps.now()) + 5);
   }
 
   private runOne(it: SchedulerInputItem): void {
@@ -161,6 +201,7 @@ export class TaskScheduler {
     // Per-item AbortController so cancel(bookmarkId) can stop the probe.
     const itemAc = new AbortController();
     this.state.itemAborters.set(it.bookmarkId, itemAc);
+    this.state.active.set(it.bookmarkId, it.url);
     const promise = (async () => {
       try {
         if (this.state.cancelled.has(it.bookmarkId)) return;
@@ -172,7 +213,7 @@ export class TaskScheduler {
             itemAc.abort();
             return;
           }
-          const result = await this.deps.probe(it.bookmarkId, it.url, itemAc.signal);
+          const result = await this.deps.probe(it.bookmarkId, it.url, attempt, itemAc.signal);
           if (this.state.cancelled.has(it.bookmarkId)) return;
           lastResult = result;
 
@@ -204,15 +245,19 @@ export class TaskScheduler {
             break;
           }
 
-          // Backoff for network errors
-          if (result.status === 'network_error') {
+          // A transient network failure and a first 404/410 are both
+          // rechecked. The latter is deliberately not called "dead" until
+          // it survives a second, independent request.
+          if (result.status === 'network_error' || result.status === 'suspected_dead') {
             attempt += 1;
             if (attempt > this.deps.maxRetries) {
-              // Final: persist a network_error record so the UI shows it.
+              // Final: preserve the most useful outcome instead of upgrading
+              // a single 404/410 to confirmed_dead without a recheck.
               const rec: LinkCheckRecord = {
                 id: this.deps.newId(),
                 bookmarkId: it.bookmarkId,
-                status: 'network_error',
+                url: it.url,
+                status: result.status,
                 checkedAt: this.deps.now(),
                 evidence: result.evidence,
                 syncGeneration: it.syncGeneration,
@@ -220,7 +265,7 @@ export class TaskScheduler {
               await this.deps.saveCheck(rec);
               break;
             }
-            await new Promise((r) => setTimeout(r, this.deps.maxRetries * 100));
+            await new Promise((r) => setTimeout(r, Math.min(5_000, 1_000 * attempt)));
             continue;
           }
 
@@ -248,6 +293,7 @@ export class TaskScheduler {
         }
         this.state.inflight.delete(it.bookmarkId);
         this.state.itemAborters.delete(it.bookmarkId);
+        this.state.active.delete(it.bookmarkId);
         this.kick();
       }
     })();

@@ -3,7 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useBookmarkStore } from '../../src/store';
 import { request } from '../../src/client';
-import type { FolderRecord } from '../../src/domain/bookmarks/types';
+import type { BookmarkRecord, FolderRecord } from '../../src/domain/bookmarks/types';
+import type { LinkCheckRecord, LinkStatus } from '../../src/domain/health/types';
 import ImportFlow from './components/ImportFlow.vue';
 import HealthView from './components/HealthView.vue';
 
@@ -16,6 +17,8 @@ const folderId = ref('');
 const page = ref(1);
 const syncing = ref(false);
 const activeTab = ref<TabName>('bookmarks');
+type BookmarkHealth = Pick<LinkCheckRecord, 'bookmarkId' | 'status' | 'checkedAt' | 'httpCode' | 'evidence'>;
+const healthByBookmark = ref<Map<string, BookmarkHealth>>(new Map());
 let debounce: ReturnType<typeof setTimeout> | undefined;
 const folders = computed(() =>
   store.folders
@@ -45,9 +48,48 @@ function syncHash() {
   }
 }
 
-async function refresh() { await store.load(query.value, folderId.value || undefined, (page.value - 1) * 200); }
+async function refresh() {
+  await store.load(query.value, folderId.value || undefined, (page.value - 1) * 200);
+  await refreshHealthBadges();
+}
+
+const healthLabels: Record<LinkStatus, string> = {
+  unchecked: '未检测', checking: '检测中', outdated: '结果已过期', healthy: '健康',
+  redirected: '已重定向', redirect_pending: '跳转待确认', auth_required: '需登录',
+  forbidden: '访问受限', rate_limited: '限流', suspected_dead: '疑似失效',
+  confirmed_dead: '已确认失效', network_error: '暂时不可验证', unsupported: '安全策略跳过',
+  permission_required: '需要权限',
+};
+const healthTagTypes: Record<LinkStatus, 'success' | 'warning' | 'danger' | 'info'> = {
+  unchecked: 'info', checking: 'warning', outdated: 'info', healthy: 'success', redirected: 'success',
+  redirect_pending: 'warning', auth_required: 'warning', forbidden: 'warning', rate_limited: 'warning',
+  suspected_dead: 'warning', confirmed_dead: 'danger', network_error: 'warning', unsupported: 'info', permission_required: 'info',
+};
+async function refreshHealthBadges(rows?: Array<Pick<LinkCheckRecord, 'bookmarkId' | 'status' | 'checkedAt' | 'httpCode' | 'evidence'>>) {
+  try {
+    const source = rows ?? (await store.healthList()).rows;
+    healthByBookmark.value = new Map(source.map((row) => [row.bookmarkId, row]));
+  } catch {
+    // Bookmark browsing must remain available if the health cache is absent.
+  }
+}
+function healthBadge(row: BookmarkRecord): BookmarkHealth | null {
+  if (!row.url) return null;
+  const health = healthByBookmark.value.get(row.id);
+  return health && health.status !== 'unchecked' ? health : null;
+}
+function healthTooltip(health: BookmarkHealth): string {
+  const bits = [healthLabels[health.status]];
+  if (health.httpCode) bits.push(`HTTP ${health.httpCode}`);
+  if (health.evidence.length) bits.push(health.evidence.join('；'));
+  return bits.join(' · ');
+}
 watch([query, folderId], () => { page.value = 1; if (debounce) clearTimeout(debounce); debounce = setTimeout(() => void refresh(), 200); });
 watch(page, () => void refresh());
+watch(activeTab, (tab) => {
+  syncHash();
+  if (tab === 'bookmarks') void refreshHealthBadges();
+});
 async function sync() {
   syncing.value = true;
   try { await store.sync(); page.value = 1; folderId.value = ''; query.value = ''; ElMessage.success('同步完成'); }
@@ -70,9 +112,6 @@ onMounted(async () => {
   activeTab.value = tabFromHash();
   syncHash();
   window.addEventListener('hashchange', () => { activeTab.value = tabFromHash(); });
-  // Keep the URL hash in sync when the user clicks a tab in the UI.
-  watch(activeTab, syncHash);
-
   await refresh();
   if (!store.stats.lastSync) await sync();
   // Lightweight UI refresh; native browser bookmark changes remain authoritative.
@@ -110,7 +149,11 @@ onMounted(async () => {
           </div>
           <el-alert v-if="store.error" :title="store.error" type="error" show-icon :closable="false"/>
           <el-table :data="store.rows" v-loading="store.loading" stripe height="min(60vh,650px)" row-key="id">
-            <el-table-column label="标题" min-width="240"><template #default="{row}"><span class="kind">{{ row.kind === 'folder' ? '📁' : '🔖' }}</span>{{ row.title || '(无标题)' }}</template></el-table-column>
+            <el-table-column label="标题" min-width="290"><template #default="{row}"><span class="kind">{{ row.kind === 'folder' ? '📁' : '🔖' }}</span>{{ row.title || '(无标题)' }}
+              <el-tooltip v-if="healthBadge(row)" :content="healthTooltip(healthBadge(row)!)" placement="top" :show-after="250">
+                <el-tag :type="healthTagTypes[healthBadge(row)!.status]" size="small" effect="plain" class="health-badge">{{ healthLabels[healthBadge(row)!.status] }}</el-tag>
+              </el-tooltip>
+            </template></el-table-column>
             <el-table-column prop="path" label="目录路径" min-width="220" show-overflow-tooltip/>
             <el-table-column label="URL" min-width="300" show-overflow-tooltip><template #default="{row}"><a v-if="row.url && /^https?:\/\//i.test(row.url)" :href="row.url" target="_blank" rel="noopener noreferrer">{{ row.url }}</a><span v-else>{{ row.url || '—' }}</span></template></el-table-column>
             <el-table-column label="添加时间" width="175"><template #default="{row}">{{ row.dateAdded ? new Date(row.dateAdded).toLocaleString() : '—' }}</template></el-table-column>
@@ -120,12 +163,12 @@ onMounted(async () => {
         <p class="notice">导入 JSON 备份是受控操作：仅在批准后才写入浏览器。删除操作会要求二次确认。所有写入由 OperationExecutor 统一执行并产生审计日志。</p>
       </el-tab-pane>
       <el-tab-pane label="链接健康" name="health">
-        <HealthView />
+        <HealthView @updated="refreshHealthBadges" />
       </el-tab-pane>
     </el-tabs>
   </div>
 </template>
 <style scoped>
 :global(body){margin:0;background:#f5f7fb;color:#263044;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
-.shell{max-width:1500px;margin:auto;padding:28px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:25px;margin:0 0 5px}header p{margin:0;color:#8490a3}.actions{display:flex;gap:8px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}.number{font-size:32px;font-weight:700;margin-bottom:8px}.date{font-size:19px;font-weight:600;margin:9px 0 12px}.stats span{color:#8490a3}.toolbar{display:flex;gap:12px;margin-bottom:18px}.kind{margin-right:8px}a{color:#2563eb;text-decoration:none}.footer{display:flex;align-items:center;justify-content:space-between;margin-top:16px;color:#8490a3}.notice{font-size:12px;color:#8490a3;margin-top:15px}@media(max-width:800px){.shell{padding:12px}header{align-items:start;gap:14px;flex-direction:column}.stats{grid-template-columns:1fr}.toolbar{flex-direction:column}}
+.shell{max-width:1500px;margin:auto;padding:28px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:25px;margin:0 0 5px}header p{margin:0;color:#8490a3}.actions{display:flex;gap:8px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}.number{font-size:32px;font-weight:700;margin-bottom:8px}.date{font-size:19px;font-weight:600;margin:9px 0 12px}.stats span{color:#8490a3}.toolbar{display:flex;gap:12px;margin-bottom:18px}.kind{margin-right:8px}.health-badge{margin-left:8px;vertical-align:middle}a{color:#2563eb;text-decoration:none}.footer{display:flex;align-items:center;justify-content:space-between;margin-top:16px;color:#8490a3}.notice{font-size:12px;color:#8490a3;margin-top:15px}@media(max-width:800px){.shell{padding:12px}header{align-items:start;gap:14px;flex-direction:column}.stats{grid-template-columns:1fr}.toolbar{flex-direction:column}}
 </style>

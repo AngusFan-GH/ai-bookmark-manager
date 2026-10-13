@@ -35,8 +35,8 @@ export interface SyncDeps {
   /** Read and write the current sync state. */
   readState(): Promise<SyncState>;
   writeState(s: SyncState): Promise<void>;
-  /** Bump and return a new syncGeneration. */
-  nextGeneration(): number;
+  /** Bump and return a new syncGeneration after the persisted value. */
+  nextGeneration(previousGeneration: number): number;
   /** Wall-clock for the snapshot. */
   now(): number;
 }
@@ -90,7 +90,7 @@ export class SyncCoordinator {
       throw new AppErrorImpl('UNKNOWN', failed.lastError ?? 'sync failed', true);
     }
 
-    const generation = this.deps.nextGeneration();
+    const generation = this.deps.nextGeneration(prev.generation);
     const now = this.deps.now();
     const flat: FlattenResult = flattenTree(tree, { now, generation });
 

@@ -13,6 +13,7 @@ import { OperationExecutor, sortSteps } from '../../src/domain/operations/execut
 import type { OperationPlan, OperationStep, Approval, OperationAuditEntry } from '../../src/domain/operations/types';
 import type { BookmarkApiNode } from '../../src/domain/operations/executor';
 import { AppErrorImpl } from '../../src/shared/errors';
+import { hashApprovedPlan } from '../../src/domain/operations/plan-hash';
 
 let currentTree: BookmarkApiNode[] = [];
 let currentApprovals = new Map<string, Approval>();
@@ -122,6 +123,7 @@ function makeApproval(planId: string, ttlMs = 60_000): Approval {
     planId,
     issuedAt: Date.now(),
     ttlMs,
+    planHash: null,
     confirmationHash: null,
     issuedBy: 'test',
   };
@@ -183,6 +185,17 @@ describe('OperationExecutor — approval', () => {
     await exec.execute(makePlan([makeStep()]), { approvalToken: approval.token });
     expect(currentApprovals.has(approval.token)).toBe(false);
   });
+
+  it('rejects a plan whose approved content has changed', async () => {
+    const { deps } = makeDeps();
+    const plan = makePlan([makeStep()]);
+    const approval = makeApproval('p1');
+    approval.planHash = await hashApprovedPlan(plan);
+    currentApprovals.set(approval.token, approval);
+    plan.steps[0].desiredAfter.title = 'tampered';
+    const exec = new OperationExecutor(deps);
+    await expect(exec.execute(plan, { approvalToken: approval.token })).rejects.toThrow(/changed after approval/);
+  });
 });
 
 describe('OperationExecutor — applies steps in order', () => {
@@ -241,6 +254,23 @@ describe('OperationExecutor — applies steps in order', () => {
 });
 
 describe('OperationExecutor — compensation', () => {
+  it('records the created browser id and removes that node on a later failure', async () => {
+    currentTree = [{ id: 'root', title: 'root', children: [] }];
+    const { deps, api } = makeDeps();
+    api.update.mockRejectedValue(new Error('forced failure'));
+    const approval = makeApproval('p1');
+    currentApprovals.set(approval.token, approval);
+    const exec = new OperationExecutor(deps);
+    const create = makeStep({
+      id: 'create', action: 'create', targetBrowserId: null, parentBrowserId: 'root',
+      expectedBefore: {}, desiredAfter: { title: 'temporary', url: 'https://example.com' },
+    });
+    const fail = makeStep({ id: 'fail', order: 1, action: 'update', targetBrowserId: 'missing' });
+    await exec.execute(makePlan([create, fail]), { approvalToken: approval.token });
+    expect(create.desiredAfter.createdBrowserId).toMatch(/^new-/);
+    expect(findById(currentTree, String(create.desiredAfter.createdBrowserId))).toBeUndefined();
+  });
+
   it('compensates a succeeded rename when a later step fails', async () => {
     currentTree = [
       { id: 'A', children: [

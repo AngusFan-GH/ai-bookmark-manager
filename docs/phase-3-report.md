@@ -1,6 +1,6 @@
 # Phase 3 交付报告
 
-> 日期：2026-10-13 | 阶段：3（链接检测引擎） | 状态：**已通过阶段 3 验收**
+> 日期：2026-10-13 | 阶段：3（链接检测引擎） | 状态：**部分完成；后续安全修订见 `docs/STATUS.md`**
 > 原则：所有命令与结果均来自真实执行；未验证项明确标注。
 
 ## 0. 阶段 3 任务清单与状态
@@ -31,18 +31,17 @@
 - 404/410 第二次 = `confirmed_dead`
 - 401/403/429/5xx 永远不会被判 dead
 
-### ADR-13：DNS resolver 抽象
-- `DnsResolver` 接口是纯函数 lookup(host) → string[]
-- 生产用 `dns.lookup` (Node-style in service worker)
-- 测试用 fake resolver
+### ADR-13：DNS resolver 抽象（修订）
+- `DnsResolver` 仅保留为可注入的平台能力与测试 seam
+- 浏览器 Service Worker 没有可移植的 Node `dns.lookup`，生产环境不再声称完成 DNS 校验
 
 ### ADR-14：per-item AbortController
 - 每个 bookmarkId 一个 AbortController
 - `cancel(bookmarkId)` 中断正在跑的 probe
 
 ### ADR-15：SSRF 防御是 best-effort
-- 静态 + DNS 双重检查
-- 但 dev guide 明确说"纯浏览器扩展不能完整实现服务器级 SSRF 防护"
+- 静态 URL 防护、用户显式 host 授权与手动重定向处理
+- 纯浏览器扩展不能完整实现服务器级 SSRF 防护
 - 用户看到 "unsupported" 状态，可以人工决定
 
 ## 2. 改动文件
@@ -54,7 +53,6 @@
 - `src/domain/health/fetch-client.ts` — HEAD/GET + 超时 + 重定向
 - `src/domain/health/scheduler.ts` — 任务调度
 - `src/domain/health/service.ts` — application facade
-- `src/infrastructure/network/dns-resolver.ts` — DNS 适配
 - `tests/fixtures/mock-http-server.ts` — 模拟 HTTP 服务
 - `tests/integration/url-guard.test.ts` — 18 测试
 - `tests/integration/classifier.test.ts` — 22 测试
@@ -155,12 +153,12 @@ Test Files  16 passed (16)
 | 410 (after retry) | ✅ confirmed_dead |
 | HEAD=405 → GET | ✅ fetch-client 切换 |
 | 超时 | ✅ 报 network_error / abort |
-| 重定向循环 | ✅ maxRedirects cap |
+| 重定向循环 | ✅ 生产请求不自动跟随重定向 |
 | 登录页 | ✅ 401 不被误判 |
 | 软 404 | ⚠ dev guide 推迟到需要用户授权正文时实现 |
 | 断网 | ✅ 网络错误路径 |
 | 无权限 | ✅ 不会调 fetch（adapter 提前 reject）|
-| 内网 URL | ✅ URLGuard 静态 + DNS 双重 |
+| 内网 URL | ✅ URLGuard 静态拦截；DNS 解析结果无法在标准扩展环境中可靠验证 |
 | 任务中断 | ✅ TaskScheduler.cancel() + AbortController |
 
 ## 6. 已知风险与未完成项
@@ -174,8 +172,8 @@ Test Files  16 passed (16)
 - **真实软 404 检测**：需要用户授权正文抓取 + 真实文章签名库。
 
 ### 纯浏览器扩展的 SSRF 限制（按 dev guide § 3.4 诚实记录）
-- 我们做静态 + DNS 双重检查
-- 但攻击者控制 DNS 时仍可能绕过
+- 我们做静态 URL 检查、可选 host 授权和手动重定向处理
+- DNS 解析结果无法在标准扩展环境中可靠验证
 - 这是浏览器扩展的固有限制，不是我们的实现缺陷
 
 ### 阶段 4 阻塞项
@@ -186,12 +184,12 @@ Test Files  16 passed (16)
 
 ## 7. 阶段 3 验收结论
 
-✅ **阶段 3 通过**。理由：
+🟡 **阶段 3 核心功能可用，但不把 DNS 验证与 Service Worker 恢复列为已完成。**
 
 1. 全部 5 个质量门禁 + lint 干净
 2. 182/182 测试覆盖（含 dev guide § 3.4 全部状态码矩阵）
 3. ADR-11/12/13/14/15 落地
-4. URLGuard 静态 + DNS 双重防御（11 类 IPv4 私有 + IPv6 全拒）
+4. URLGuard 静态防御（私网 IPv4、IPv6 与危险协议）+ 可选 host 授权
 5. Classifier 11 种状态码路径全测
 6. TaskScheduler 全局/域名并发 + Retry-After + cancel
 7. Dexie v3 + 升级保留数据

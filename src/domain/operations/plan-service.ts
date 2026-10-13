@@ -27,6 +27,7 @@ import { validateImport, hasForbiddenKeys } from './import';
 import { diffImport, type ImportMode, type DiffOp, type FlatNode } from './diff';
 import { validatePlan } from './validator';
 import { OperationExecutor, type ExecutorDeps } from './executor';
+import { hashApprovedPlan } from './plan-hash';
 
 export interface PlanServiceDeps {
   bookmarksApi: ExecutorDeps['bookmarksApi'];
@@ -79,7 +80,20 @@ export class PlanService {
       newId: () => deps.newId(),
       now: () => deps.now(),
       validate: async (p) => { validatePlan(p); },
-      assertStillValid: async () => undefined, // background-only check; placeholder
+      assertStillValid: async (step) => {
+        if (step.action === 'create') {
+          if (!step.parentBrowserId) throw new AppErrorImpl('PLAN_STALE', 'create target folder is missing', false);
+          await deps.bookmarksApi.get(step.parentBrowserId);
+          return;
+        }
+        if (!step.targetBrowserId) throw new AppErrorImpl('PLAN_STALE', 'operation target is missing', false);
+        const live = await deps.bookmarksApi.get(step.targetBrowserId);
+        for (const [key, expected] of Object.entries(step.expectedBefore)) {
+          if ((live as unknown as Record<string, unknown>)[key] !== expected) {
+            throw new AppErrorImpl('PLAN_STALE', `target changed: ${key}`, false);
+          }
+        }
+      },
     });
   }
 
@@ -240,7 +254,10 @@ export class PlanService {
       token: this.deps.newId(),
       planId,
       issuedAt: this.deps.now(),
-      ttlMs,
+      // UI input is untrusted. Keep tokens short-lived even if a caller
+      // attempts to request an unbounded or negative lifetime.
+      ttlMs: Math.min(Math.max(ttlMs, 1_000), 5 * 60_000),
+      planHash: await hashApprovedPlan(plan),
       confirmationHash: null,
       issuedBy: 'options-ui',
     };

@@ -143,9 +143,8 @@ explicitly walking this chain. Dev guide red line #1 is satisfied.
 ## 8. Privacy checklist (dev guide § 10)
 
 - [x] Default read-only. The only writes happen through the chain above.
-- [x] Host permissions declared in manifest; no expansion without a
-  release (Phase 3 will add per-site `<all_urls>`-style requests for
-  link scanning, with explicit UI consent).
+- [x] 链接扫描的 host permission 作为 optional permission 声明；仅在用户
+  在健康页明确授权后请求，且可在同页撤销。
 - [x] JSON export omits API keys, auth, page text, chat history
   (`exportBackup` in `entrypoints/background.ts`).
 - [x] Import rejects forbidden keys via `hasForbiddenKeys()`.

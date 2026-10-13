@@ -31,7 +31,7 @@ function buildCoordinator() {
       readTree: () => Promise.resolve(tree),
       readState: () => Promise.resolve(storedState),
       writeState: (s: SyncState) => { storedState = s; return Promise.resolve(); },
-      nextGeneration: () => ++currentGen,
+      nextGeneration: (previousGeneration) => (currentGen = Math.max(currentGen, previousGeneration) + 1),
       now: () => Date.now(),
     }),
   };
@@ -165,6 +165,20 @@ describe('SyncCoordinator — error reporting and failed state', () => {
     // totalCount = 1 root folder + 3 bookmarks
     expect(r.state.count).toBe(4);
     expect(r.state.generation).toBe(1);
+  });
+});
+
+describe('SyncCoordinator — persisted generation', () => {
+  it('never regresses generation after a service-worker restart', async () => {
+    tree = makeFlatTree(1);
+    storedState = {
+      status: 'succeeded', lastSyncAt: 1, lastError: null, count: 1, generation: 9,
+    };
+    // A fresh worker starts with no in-memory generation knowledge.
+    currentGen = 0;
+    const { coordinator } = buildCoordinator();
+    const r = await coordinator.fullSync('startup');
+    expect(r.generation).toBe(10);
   });
 });
 

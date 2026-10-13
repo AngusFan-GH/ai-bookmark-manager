@@ -8,32 +8,33 @@
 
 ```
 src/domain/health/
-  types.ts       LinkStatus (12 values), LinkCheckRecord, HealthConfig
+  types.ts       LinkStatus, LinkCheckRecord, HealthConfig
   url-guard.ts   guardUrl(), guardResolvedHost(), isPrivateLiteralAddress()
   classifier.ts  classify() — pure function from inputs to LinkStatus
   fetch-client.ts  fetchOnce(), probeUrl(), shouldRetryAsGet()
   scheduler.ts  TaskScheduler — concurrency, retries, host gating
   service.ts     HealthService — façade used by the background router
 
-src/infrastructure/network/
-  dns-resolver.ts  createBrowserDnsResolver() — wraps the browser dns API
 ```
 
-## 2. The 12 LinkStatus values
+## 2. LinkStatus values
 
 | Value | Meaning | When |
 | --- | --- | --- |
 | `unchecked` | Never scanned | Initial state |
 | `checking` | In flight | `TaskScheduler` is running a probe |
-| `healthy` | 2xx | HEAD or GET returns 200–299 |
-| `redirected` | 3xx followed | Final hop after redirects is 3xx |
+| `unchecked` | Not scanned | No current result exists for this bookmark URL |
+| `outdated` | Old result | Bookmark URL or sync version changed after its last check |
+| `healthy` | 2xx | HEAD returned 2xx, or GET verification returned 2xx |
+| `redirected` | 3xx followed | A platform adapter safely followed the redirect |
+| `redirect_pending` | Redirect needs review | Browser hid the manual redirect target, so it was not followed |
 | `auth_required` | 401 / 407 | Not dead; needs login |
 | `forbidden` | 403 | Not dead; site gates bots |
 | `rate_limited` | 429 | Server sent `Retry-After`; we honor it |
 | `suspected_dead` | 404 / 410 first hit | Needs retry window before promotion |
 | `confirmed_dead` | 404 / 410 after retry | Real dead |
 | `network_error` | DNS / TCP / TLS / 5xx | Retryable; classifier treats 5xx the same as a network error |
-| `unsupported` | non-http(s) or resolved to private IP | Static guard or DNS guard rejected |
+| `unsupported` | unsafe URL | Static guard rejected the URL |
 | `permission_required` | Extension lacks host permission | Not auto-resolvable; needs user grant |
 
 ## 3. The classifier
@@ -43,8 +44,9 @@ src/infrastructure/network/
 The state machine is intentionally conservative:
 
 - 401/407/403/429/5xx **never** become "dead" on the first hit.
-- 404/410 is `suspected_dead` on the first hit, `confirmed_dead` only
-  after `attempts >= 1` (i.e. the scheduler retried).
+- A non-2xx HEAD response is confirmed with a bounded GET before classification.
+- 404/410 is `suspected_dead` on the first GET hit, `confirmed_dead` only
+  after a second GET check.
 - 429 carries `retryAfterSec` so the scheduler can sleep that host.
 - Network errors have no httpCode at all; we record the stage
   (`dns` / `tcp` / `tls` / `abort` / `unknown`).
@@ -67,24 +69,18 @@ bookmark**; the worst it does is mark a row `confirmed_dead`.
   `203.0.113/24` (TEST-NET-3), `224/4` (multicast+)
 - Literal IPv6 (we conservatively reject all hex-form hosts)
 
-`guardResolvedHost()` is the runtime half. It calls
-`resolver.lookup(host)` and rejects if any returned address is in
-the same private set. In production this uses `dns.lookup` from the
-service worker scope. In tests we inject a fake.
-
-> **Dev guide caveat (recorded honestly in `docs/phase-3-report.md`)**
-> Pure browser extensions cannot fully implement server-side SSRF
-> defense. A determined attacker controlling DNS could resolve
-> `evil.example.com` to a private IP. Our defenses are best-effort
-> and the user is shown "unsupported" so they can decide.
+`guardResolvedHost()` remains an injectable helper for platforms that
+provide a trustworthy resolver. Standard browser extension service workers
+do not provide a portable DNS API, so production relies on static URL
+screening, user-granted host permissions, and manual redirect handling.
 
 ## 5. The fetch client
 
 Two policies:
 
-1. **HEAD first.** Cheaper, smaller, often enough.
-2. **Fall back to GET on 405 / 501.** Some servers don't implement
-   HEAD; we use `shouldRetryAsGet(httpCode)` to decide.
+1. **HEAD first.** A 2xx HEAD is a cheap positive signal.
+2. **Confirm any non-2xx or failed HEAD with GET.** CDN/WAF method rules
+   frequently make a HEAD-only failure misleading.
 
 The actual HTTP is done by a `fetch: FetchLikeFn` dependency that the
 background router supplies — in production it wraps the global
@@ -95,7 +91,9 @@ Hard limits:
 
 - 10 s timeout (configurable via `HealthConfig.timeoutMs`)
 - 1 MB response body cap (configurable via `maxResponseBytes`)
-- 5 redirects (configurable via `maxRedirects`)
+- Production requests use `redirect: 'manual'`; an opaque redirect is marked
+  `redirect_pending`, not dead or unsupported, and its target is never fetched
+  automatically.
 - `Retry-After` header is parsed to a number of seconds and surfaced
   to the scheduler.
 
@@ -116,10 +114,13 @@ Hard limits:
 `HealthService` wraps the scheduler and:
 
 - Reads bookmarks from Dexie, filters to those with URLs
-- Runs `guardUrl()` + `guardResolvedHost()` for each; URLs that
-  fail either guard are persisted as a single `unsupported` record
+- Requires an explicit optional host permission before any request; otherwise
+  it persists `permission_required` without calling fetch
+- Runs `guardUrl()` for each; rejected URLs are persisted as a single
+  `unsupported` record
 - The remaining items go to the scheduler
-- `snapshot()` returns the latest `LinkCheckRecord` per bookmark
+- `snapshot()` returns one result per current bookmark URL; results from an
+  older URL or sync generation are marked `outdated`
 - `startHealth()` accepts an optional subset of bookmark ids
 
 ## 7. The classifier in the test matrix
@@ -156,7 +157,7 @@ RFC 5735 / RFC 6890.
 - ✅ 200 / 301-302 / 404-410 / 401 / 403 / 429 / 500 — all covered
 - ✅ HEAD=405 → GET fallback — covered
 - ✅ Timeout — covered
-- ✅ Redirect loop — `maxRedirects` cap covers
+- ✅ Redirect safety — production uses manual redirects and refuses opaque targets
 - ✅ Soft 404 — not implemented in Phase 3 (requires page body
   parsing; deferred to Phase 4 or later as the dev guide says it
   requires user authorization for body fetching)
@@ -169,8 +170,8 @@ RFC 5735 / RFC 6890.
 ## 9. Privacy checklist (dev guide § 10)
 
 - [x] Default does nothing — health scans are user-initiated.
-- [x] Host permission for fetching is implicit in the extension's
-  manifest. Phase 3 does not request new host permissions.
+- [x] Host permission for fetching is optional and is requested only after the
+  user clicks the health-page authorization control.
 - [x] Page bodies are not stored — only status / final URL / response
   code / small evidence strings. `LinkCheckRecord.evidence` holds
   things like `['200']` or `['→ https://final.example.com']`, never
@@ -184,11 +185,7 @@ RFC 5735 / RFC 6890.
 - **Soft 404 detection** (body fingerprinting). Requires
   user-authorized body fetch and a corpus of "real article" vs
   "404 page" signatures.
-- **Auto re-scheduling** (chrome.alarms). The current UI just runs
-  one scan per click; the dev guide asks for `chrome.alarms` resume
-  of an interrupted scan. The plumbing is there (`TaskScheduler`
-  is persistent only via the linkChecks store rows), but the
-  alarm-based resumption is left for Phase 5+ where alarm permissions
-  are already documented.
+- **Auto re-scheduling / service-worker recovery**. The current UI runs one
+  scan per click; in-memory queued work is not restored after a worker restart.
 - **Bulk recheck selection UI** — the `selectedIds` ref is reserved.
 - **Per-host export** — not requested by the dev guide.

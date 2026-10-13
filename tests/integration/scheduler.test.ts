@@ -51,6 +51,22 @@ describe('TaskScheduler — basic enqueue + complete', () => {
     expect(saved.map((s) => s.bookmarkId).sort()).toEqual(['b1', 'b2', 'b3']);
     expect(saved.every((s) => s.status === 'healthy')).toBe(true);
   });
+
+  it('exposes the URLs currently being checked for a live progress UI', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const sched = new TaskScheduler(makeDeps({
+      probe: async (_id, url) => {
+        await gate;
+        return { status: 'healthy', final: true, evidence: [], httpCode: 200, finalUrl: url };
+      },
+    }));
+    sched.enqueue([{ bookmarkId: 'b1', url: 'https://a.test/active', syncGeneration: 1 }]);
+    expect(sched.status().active).toEqual([{ bookmarkId: 'b1', url: 'https://a.test/active' }]);
+    release();
+    await sched.drain();
+    expect(sched.status().active).toEqual([]);
+  });
 });
 
 describe('TaskScheduler — per-host concurrency cap', () => {

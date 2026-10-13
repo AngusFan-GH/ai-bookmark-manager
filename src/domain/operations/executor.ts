@@ -24,6 +24,7 @@ import type {
   OperationAuditEntry,
 } from './types';
 import { AppErrorImpl } from '../../shared/errors';
+import { hashApprovedPlan } from './plan-hash';
 
 /**
  * Minimal shapes of the four write APIs the executor calls. We do NOT
@@ -123,6 +124,7 @@ export interface ExecuteResult {
 /** Status of the executor — at most one plan runs at a time. */
 export class OperationExecutor {
   private inflight: Promise<ExecuteResult> | null = null;
+  private inflightPlanId: string | null = null;
   constructor(private readonly deps: ExecutorDeps) {}
 
   /**
@@ -131,8 +133,15 @@ export class OperationExecutor {
    * writer rule).
    */
   execute(plan: OperationPlan, opts: ExecuteOptions = {}): Promise<ExecuteResult> {
-    if (this.inflight) return this.inflight;
-    this.inflight = this.run(plan, opts).finally(() => { this.inflight = null; });
+    if (this.inflight) {
+      if (this.inflightPlanId === plan.id) return this.inflight;
+      return Promise.reject(new AppErrorImpl('INVALID_REQUEST', 'another operation plan is already executing', true));
+    }
+    this.inflightPlanId = plan.id;
+    this.inflight = this.run(plan, opts).finally(() => {
+      this.inflight = null;
+      this.inflightPlanId = null;
+    });
     return this.inflight;
   }
 
@@ -147,6 +156,9 @@ export class OperationExecutor {
       }
       if (approval.planId !== plan.id) {
         throw new AppErrorImpl('INVALID_REQUEST', 'approval token does not match plan', false);
+      }
+      if (approval.planHash !== null && approval.planHash !== await hashApprovedPlan(plan)) {
+        throw new AppErrorImpl('PLAN_STALE', 'plan changed after approval', false);
       }
       if (Date.now() - approval.issuedAt > approval.ttlMs) {
         throw new AppErrorImpl('INVALID_REQUEST', 'approval token expired', false);
@@ -211,7 +223,13 @@ export class OperationExecutor {
 
       // Apply the step.
       try {
-        await this.apply(step);
+        // Persist the intent before the browser write so recovery/audit can
+        // distinguish a pending step from one interrupted mid-operation.
+        step.status = 'running';
+        await this.deps.saveStep(step);
+        await this.audit(plan, step, 'started');
+        const createdBrowserId = await this.apply(step);
+        if (createdBrowserId) step.desiredAfter.createdBrowserId = createdBrowserId;
         step.status = 'succeeded';
         step.errorMessage = null;
         succeeded += 1;
@@ -261,7 +279,7 @@ export class OperationExecutor {
     return { planId: plan.id, status: finalStatus, succeeded, failed, compensated };
   }
 
-  private async apply(step: OperationStep): Promise<void> {
+  private async apply(step: OperationStep): Promise<string | void> {
     const api = this.deps.bookmarksApi;
     switch (step.action) {
       case 'create': {
@@ -278,8 +296,11 @@ export class OperationExecutor {
         if (typeof step.desiredAfter.index === 'number') {
           details.index = step.desiredAfter.index;
         }
-        await api.create(details);
-        return;
+        const created = await api.create(details);
+        // chrome.bookmarks.create assigns the browser id. Store the returned
+        // value before the succeeded state is persisted so compensation can
+        // remove exactly the node this plan created.
+        return created.id;
       }
       case 'rename': {
         if (!step.targetBrowserId) {
@@ -350,7 +371,9 @@ export class OperationExecutor {
       case 'create': {
         // Find the newly created node by some marker. For now we expect
         // the caller to have stored the new id in desiredAfter.
-        const newId = typeof step.desiredAfter.id === 'string' ? step.desiredAfter.id : null;
+        const newId = typeof step.desiredAfter.createdBrowserId === 'string'
+          ? step.desiredAfter.createdBrowserId
+          : typeof step.desiredAfter.id === 'string' ? step.desiredAfter.id : null;
         if (!newId) {
           throw new AppErrorImpl('UNKNOWN', 'cannot compensate create: no new id recorded', false);
         }

@@ -172,21 +172,22 @@ describe('probeUrl — HEAD then GET fallback', () => {
     expect(outcome.httpCode).toBe(200);
   });
 
-  it('keeps HEAD when 404', async () => {
+  it('confirms a HEAD 404 with GET', async () => {
     const path = '/head-404';
     server.setRoute(path, () => ({ status: 404 }));
     const { method, outcome } = await probeUrl(server.baseUrl + path, deps());
-    expect(method).toBe('HEAD');
+    expect(method).toBe('GET');
     expect(outcome.httpCode).toBe(404);
   });
 });
 
-describe('shouldRetryAsGet — confirms HEAD→GET policy', () => {
-  it('returns true only for 405 and 501', () => {
+describe('shouldRetryAsGet — confirms ambiguous HEAD results', () => {
+  it('returns true for every non-2xx response', () => {
     expect(shouldRetryAsGet(405)).toBe(true);
     expect(shouldRetryAsGet(501)).toBe(true);
-    expect(shouldRetryAsGet(404)).toBe(false);
-    expect(shouldRetryAsGet(403)).toBe(false);
+    expect(shouldRetryAsGet(404)).toBe(true);
+    expect(shouldRetryAsGet(403)).toBe(true);
+    expect(shouldRetryAsGet(200)).toBe(false);
   });
 });
 

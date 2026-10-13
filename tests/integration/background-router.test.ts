@@ -33,8 +33,13 @@ const deps = () => ({
   // Phase 3
   startHealth: vi.fn().mockResolvedValue({ total: 0, enqueued: 0, skipped: 0 }),
   cancelHealth: vi.fn().mockResolvedValue({ status: 'cancelled' }),
-  healthStatus: vi.fn().mockResolvedValue({ status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0 }),
-  listHealth: vi.fn().mockResolvedValue({ rows: [], status: { status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0 } }),
+  pauseHealth: vi.fn().mockResolvedValue({ status: 'paused' }),
+  resumeHealth: vi.fn().mockResolvedValue({ status: 'running' }),
+  healthStatus: vi.fn().mockResolvedValue({ status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0, cancelled: 0, active: [], nextEligibleAt: null, lastError: null }),
+  listHealth: vi.fn().mockResolvedValue({ rows: [], status: { status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0, cancelled: 0, active: [], nextEligibleAt: null, lastError: null } }),
+  healthPermissionStatus: vi.fn().mockResolvedValue({ granted: false }),
+  requestHealthPermission: vi.fn().mockResolvedValue({ granted: true }),
+  removeHealthPermission: vi.fn().mockResolvedValue({ granted: false }),
   // Phase 3.5
   getSetting: vi.fn().mockResolvedValue(false),
   setSetting: vi.fn().mockResolvedValue(undefined),
@@ -63,8 +68,13 @@ function wireLikeBackground(d: ReturnType<typeof deps>): BackgroundRouter {
     .register('EXECUTE', (req) => d.executePlan(req.planId, req.approvalToken, req.dryRun))
     .register('HEALTH_START', (req) => d.startHealth(req.bookmarkIds))
     .register('HEALTH_CANCEL', () => d.cancelHealth())
+    .register('HEALTH_PAUSE', () => d.pauseHealth())
+    .register('HEALTH_RESUME', () => d.resumeHealth())
     .register('HEALTH_STATUS', () => d.healthStatus())
     .register('HEALTH_LIST', () => d.listHealth())
+    .register('HEALTH_PERMISSION_STATUS', () => d.healthPermissionStatus())
+    .register('HEALTH_PERMISSION_REQUEST', () => d.requestHealthPermission())
+    .register('HEALTH_PERMISSION_REMOVE', () => d.removeHealthPermission())
     .register('SETTINGS_GET', (req) => d.getSetting(req.key))
     .register('SETTINGS_SET', (req) => d.setSetting(req.key, req.value));
 }
@@ -160,8 +170,13 @@ describe('BackgroundRouter — background.ts wiring regression', () => {
       'EXECUTE',
       'HEALTH_START',
       'HEALTH_CANCEL',
+      'HEALTH_PAUSE',
+      'HEALTH_RESUME',
       'HEALTH_STATUS',
       'HEALTH_LIST',
+      'HEALTH_PERMISSION_STATUS',
+      'HEALTH_PERMISSION_REQUEST',
+      'HEALTH_PERMISSION_REMOVE',
       'SETTINGS_GET',
       'SETTINGS_SET',
     ];

@@ -1,10 +1,11 @@
 import { defineConfig, defineWebExtConfig } from 'wxt';
 import vue from '@vitejs/plugin-vue';
+import { platform } from 'node:process';
 
 export default defineConfig({
   modules: [],
   vite: () => ({ plugins: [vue()] }),
-  // Why `webExt`:
+  // Why `webExt` on macOS:
   //   WXT's `wxt dev` (and `wxt`) auto-launches a fresh Chromium via
   //   `web-ext-run`. That browser is created with a TEMPORARY, isolated
   //   profile in /var/folders/.../tmp-web-ext--*/Default, so it has none of
@@ -17,21 +18,27 @@ export default defineConfig({
   //        from `.output/chrome-mv3-dev/` in their NORMAL Chrome via
   //        chrome://extensions (where their real bookmarks live).
   //
-  //   We tried `.webextrc` `disabled: true` — that flag only affects WXT's
+  //   Windows and Linux rely on web-ext-run's native browser discovery rather
+  //   than inheriting a macOS-only absolute path. We tried `.webextrc` `disabled: true` — that flag only affects WXT's
   //   help-text "canReopenBrowser" hint; it does not skip the auto-open
   //   call. WXT 0.20 has no CLI flag to skip it either. The accepted dev
   //   workflow is therefore: let the temp browser open, close it, load the
   //   extension in the developer's normal Chrome.
-  webExt: defineWebExtConfig({
-    binaries: {
-      chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    },
-  }),
+  ...(platform === 'darwin' ? {
+    webExt: defineWebExtConfig({
+      binaries: {
+        chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      },
+    }),
+  } : {}),
   manifest: {
     name: 'AI Bookmark Manager',
     description: 'Local-first bookmark manager with safe indexing and JSON backup',
     version: '0.1.0',
     permissions: ['bookmarks', 'storage'],
+    // Link health is opt-in. The extension requests these at runtime from a
+    // user gesture; it has no standing permission to contact arbitrary sites.
+    optional_host_permissions: ['http://*/*', 'https://*/*'],
     action: { default_title: 'AI Bookmark Manager' },
     // `commands` here augments WXT's defaults. We want the user to be
     // able to jump to the link-health tab with a single keyboard

@@ -3,19 +3,21 @@
 // Link health domain types. Mirrors dev guide § 3.4.
 //
 // Design constraints:
-//   - 12 distinct LinkStatus values, each a string literal — not a
+//   - Distinct LinkStatus values, each a string literal — not a
 //     number — so they round-trip cleanly through IndexedDB.
 //   - `evidence` is a list of short strings for the UI ("HEAD 405",
-//     "Retry-After: 120", "5 redirects"); we never store page bodies
+//     "检查方式：GET", "Retry-After: 120"); we never store page bodies
 //     or query-string secrets (dev guide § 10).
 //   - `httpCode` is the final response code; `finalUrl` records the
-//     last hop of a redirect chain.
+//     original bookmark URL and (when available) the final response URL.
 
 export type LinkStatus =
   | 'unchecked'         // never scanned
   | 'checking'          // in flight
+  | 'outdated'          // bookmark URL changed after this result
   | 'healthy'           // 2xx
-  | 'redirected'        // 3xx (followed; the bookmark is alive)
+  | 'redirected'        // 3xx followed; the bookmark is alive
+  | 'redirect_pending'  // 3xx seen but target was intentionally not followed
   | 'auth_required'     // 401 / 407
   | 'forbidden'         // 403
   | 'rate_limited'       // 429
@@ -26,7 +28,7 @@ export type LinkStatus =
   | 'permission_required'; // extension lacks host permission
 
 export type HealthCheckOutcome =
-  | Exclude<LinkStatus, 'unchecked' | 'checking' | 'permission_required'>;
+  | Exclude<LinkStatus, 'unchecked' | 'checking' | 'outdated' | 'permission_required'>;
 
 export interface LinkCheckRecord {
   id: string;

@@ -44,7 +44,6 @@ const IPV4_PRIVATE_PATTERNS: Array<{ test: (ip: number) => boolean; label: strin
   { test: (ip) => (ip >>> 24) === 192 && ((ip >>> 16) & 0xff) === 2, label: '192.0.2.0/24 (TEST-NET-1)' },
   { test: (ip) => (ip >>> 24) === 198 && ((ip >>> 16) & 0xff) === 51 && ((ip >>> 8) & 0xff) === 100, label: '198.51.100.0/24 (TEST-NET-2)' },
   { test: (ip) => (ip >>> 24) === 203 && ((ip >>> 16) & 0xff) === 0 && ((ip >>> 8) & 0xff) === 113, label: '203.0.113.0/24 (TEST-NET-3)' },
-  { test: (ip) => (ip >>> 20) === 0xb0, label: '11.0.0.0/8 (legacy — also reserved)' },
   { test: (ip) => (ip >>> 24) >= 224, label: '224.0.0.0/4 (multicast/reserved)' },
 ];
 

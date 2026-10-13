@@ -1,6 +1,6 @@
 # AI Bookmark Manager
 
-Local-first Chrome/Edge bookmark indexing extension. **Read-only for native bookmarks.**
+Local-first Chrome/Edge bookmark indexing extension. Native bookmark writes are disabled by default and may only run through the Phase 2 approved `OperationPlan` flow.
 
 ## Development Stage
 
@@ -9,11 +9,11 @@ This project follows a 7-phase development plan.
 - **Phase 0 — Audit & Quality Baseline** ✅ passed ([report](./docs/audit-phase0.md))
 - **Phase 1 — Bookmark data + UI** ✅ passed ([report](./docs/phase-1-report.md), [data model](./docs/data-model.md))
 - **Phase 2 — Backup + safe write executor** ✅ passed ([report](./docs/phase-2-report.md), [security notes](./docs/security.md))
-- **Phase 3 — Link health** ✅ passed ([report](./docs/phase-3-report.md), [implementation notes](./docs/link-health.md))
+- **Phase 3 — Link health** 🟡 core flow available; DNS verification and worker-restart recovery remain deferred ([status](./docs/STATUS.md), [implementation notes](./docs/link-health.md))
 
 The contract that all subsequent agents follow is in [`docs/DEVELOPMENT_GUIDE.md`](./docs/DEVELOPMENT_GUIDE.md).
 
-Do not start Phase 3 work until the development guide's stop conditions are reviewed and the Phase 2 report is accepted.
+Phase 4 work starts only after the development guide's stop conditions and the Phase 0–3 reports have been reviewed.
 
 ## Requirements
 
@@ -38,9 +38,9 @@ To develop against your real bookmarks, load the extension into your **normal** 
 1. Start the dev server: `npm run dev` — leave it running.
 2. In **your normal Chrome** (the one with all your bookmarks), open `chrome://extensions`.
 3. Toggle **Developer mode** (top-right).
-4. Click **Load unpacked** and select:
+4. Click **Load unpacked** and select the project’s generated directory:
    ```
-   /Users/angusfan/Desktop/ai-bookmark-manager/.output/chrome-mv3-dev/
+   <project-root>/.output/chrome-mv3-dev/
    ```
 5. Pin the extension (puzzle icon → pin) and click its icon → "打开书签管理中心".
 
@@ -49,14 +49,14 @@ HMR is active. When you save any `.ts` / `.vue` / `.css` file, the dev server pu
 Convenience scripts:
 
 ```bash
-npm run open:chrome-ext   # open chrome://extensions in your default browser
-npm run open:devdir       # open the .output/chrome-mv3-dev/ folder in Finder
+npm run open:chrome-ext   # macOS convenience command; open chrome://extensions manually on Windows
+npm run open:devdir       # macOS convenience command; open .output/chrome-mv3-dev in Explorer on Windows
 npm run dev:clean         # wipe .wxt/ + .output/ and re-prepare, then start
 ```
 
 ### Why the temp Chrome window?
 
-`wxt dev` is wired to `web-ext-run`, which always launches a fresh Chromium with a temporary profile in `/var/folders/.../tmp-web-ext--*/Default/`. WXT 0.20 does not expose a CLI flag to skip this. Closing that temp window is harmless — it is not where the extension lives during development. See `wxt.config.ts` for details.
+`wxt dev` is wired to `web-ext-run`, which launches a fresh Chromium profile in the operating system's temporary directory. WXT 0.20 does not expose a CLI flag to skip this. Closing that temp window is harmless — it is not where the extension lives during development. On Windows and Linux, browser discovery is automatic; macOS uses the configured Chrome path. See `wxt.config.ts` for details.
 
 ## Quality gates
 
@@ -92,10 +92,10 @@ All five required commands (`typecheck`, `test`, `build`, `lint`, plus `dev`) ar
 9. Click "重新同步" and confirm no duplicate records.
 10. Verify the extension never changes browser bookmarks itself.
 
-## Constraints (Iteration 1)
+## Current constraints
 
-- The JSON file is a backup/export; **import-and-restore UI is not implemented** in this iteration.
+- Import and restore use the Phase 2 preview, plan, approval, snapshot and executor flow; no native write happens before explicit approval.
 - Change events trigger a debounced **full reconciliation**, not true per-node incremental writes; this avoids stale descendant paths on folder rename/move.
 - This build is Chrome/Edge MV3-focused; Firefox compatibility is not yet verified.
-- Very large bookmark sets may require replacing in-memory filtering with indexed search.
+- The current bookmark list uses in-memory filtering after loading the local index; very large bookmark sets may require indexed search or query pagination in a later phase.
 - The browser itself may sync bookmarks via the signed-in browser profile; the extension does not implement cross-device sync.

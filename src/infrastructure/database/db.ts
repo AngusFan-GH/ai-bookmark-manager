@@ -91,8 +91,13 @@ export const db = new BookmarkDatabase();
 
 let currentGeneration = 0;
 
-/** Bump and return the new generation. Call before each full sync. */
-export function nextGeneration(): number {
+/**
+ * Bump and return the new generation. The persisted generation from the
+ * previous successful sync is supplied by SyncCoordinator so an MV3 service
+ * worker restart can never make the in-memory counter move backwards.
+ */
+export function nextGeneration(previousGeneration = 0): number {
+  currentGeneration = Math.max(currentGeneration, Math.max(0, previousGeneration | 0));
   currentGeneration += 1;
   return currentGeneration;
 }

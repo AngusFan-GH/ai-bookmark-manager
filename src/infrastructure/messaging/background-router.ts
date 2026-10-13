@@ -40,8 +40,13 @@ export interface RouterDeps {
   // Phase 3: link health
   startHealth(bookmarkIds?: string[]): Promise<HealthRunSummary>;
   cancelHealth(): Promise<{ status: string }>;
+  pauseHealth(): Promise<{ status: string }>;
+  resumeHealth(): Promise<{ status: string }>;
   healthStatus(): Promise<HealthStatusSummary>;
   listHealth(): Promise<unknown[]>;
+  healthPermissionStatus(): Promise<{ granted: boolean }>;
+  requestHealthPermission(): Promise<{ granted: boolean }>;
+  removeHealthPermission(): Promise<{ granted: boolean }>;
   // Phase 3.5: settings (read / write the allowPrivateHosts flag)
   getSetting(key: 'allowPrivateHosts'): Promise<boolean>;
   setSetting(key: 'allowPrivateHosts', value: boolean): Promise<void>;

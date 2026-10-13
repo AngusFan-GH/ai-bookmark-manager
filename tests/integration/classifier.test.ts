@@ -85,12 +85,12 @@ describe('classify — fallback', () => {
 });
 
 describe('shouldRetryAsGet', () => {
-  it('returns true only for 405 and 501', () => {
+  it('requires GET confirmation for every non-2xx HEAD response', () => {
     expect(shouldRetryAsGet(405)).toBe(true);
     expect(shouldRetryAsGet(501)).toBe(true);
     expect(shouldRetryAsGet(200)).toBe(false);
-    expect(shouldRetryAsGet(403)).toBe(false);
-    expect(shouldRetryAsGet(404)).toBe(false);
-    expect(shouldRetryAsGet(500)).toBe(false);
+    expect(shouldRetryAsGet(403)).toBe(true);
+    expect(shouldRetryAsGet(404)).toBe(true);
+    expect(shouldRetryAsGet(500)).toBe(true);
   });
 });

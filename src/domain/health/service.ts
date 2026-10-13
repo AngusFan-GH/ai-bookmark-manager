@@ -32,8 +32,10 @@ export interface HealthServiceDeps {
   latestChecks(): Promise<LinkCheckRecord[]>;
   /** Save a new link check row. */
   saveCheck(rec: LinkCheckRecord): Promise<void>;
-  /** DNS resolver for the URL guard. */
-  dns: DnsResolver;
+  /** Optional DNS resolver. Standard WebExtensions do not expose one. */
+  dns?: DnsResolver;
+  /** Whether the extension currently has permission to contact this origin. */
+  canFetch(url: string): Promise<boolean>;
   /** HTTP fetcher matching the FetchLikeFn contract. */
   fetch: FetchLikeFn;
   /** Config knobs. */
@@ -59,6 +61,9 @@ export interface HealthServiceStatus {
   processed: number;
   inflight: number;
   queued: number;
+  cancelled: number;
+  active: Array<{ bookmarkId: string; url: string }>;
+  nextEligibleAt: number | null;
   lastError: string | null;
 }
 
@@ -74,24 +79,38 @@ export class HealthService {
 
   /** Returns the most recent check per bookmarkId, sorted by status. */
   async snapshot(): Promise<{ rows: LinkCheckRecord[]; status: HealthServiceStatus }> {
-    const rows = await this.deps.latestChecks();
+    const [rows, bookmarks] = await Promise.all([this.deps.latestChecks(), this.deps.listBookmarks()]);
     // Index by bookmarkId, keep latest by checkedAt.
     const byBookmark = new Map<string, LinkCheckRecord>();
     for (const r of rows) {
       const prev = byBookmark.get(r.bookmarkId);
       if (!prev || r.checkedAt > prev.checkedAt) byBookmark.set(r.bookmarkId, r);
     }
+    const current = new Map(bookmarks.filter((b) => b.url).map((b) => [b.id, b]));
+    const displayRows: LinkCheckRecord[] = [];
+    for (const bookmark of current.values()) {
+      const check = byBookmark.get(bookmark.id);
+      if (!check) {
+        displayRows.push({ id: `unchecked:${bookmark.id}`, bookmarkId: bookmark.id, url: bookmark.url, status: 'unchecked', checkedAt: 0, evidence: ['尚未检查'], syncGeneration: bookmark.syncGeneration });
+        continue;
+      }
+      if (check.url !== bookmark.url || check.syncGeneration !== bookmark.syncGeneration) {
+        displayRows.push({ ...check, url: bookmark.url, status: 'outdated', checkedAt: check.checkedAt, evidence: ['书签 URL 或同步版本已变化；请重新检查'], syncGeneration: bookmark.syncGeneration });
+        continue;
+      }
+      displayRows.push(check);
+    }
     this.latestCache = byBookmark;
     return {
-      rows: Array.from(byBookmark.values()),
+      rows: displayRows,
       status: this.snapshotStatus(),
     };
   }
 
   /** Start a scan. If `bookmarkIds` is given, scan only those. */
-  async start(bookmarkIds?: string[]): Promise<{ total: number; enqueued: number; skipped: number }> {
-    if (this.scheduler && this.status === 'running') {
-      return { total: this.total, enqueued: 0, skipped: 0 };
+  async start(bookmarkIds?: string[]): Promise<{ total: number; enqueued: number; skipped: number; status: HealthServiceStatus['status'] }> {
+    if (this.scheduler && (this.status === 'running' || this.status === 'paused')) {
+      return { total: this.total, enqueued: 0, skipped: 0, status: this.status };
     }
     this.lastError = null;
     this.processed = 0;
@@ -122,11 +141,28 @@ export class HealthService {
           syncGeneration: (b as { syncGeneration?: number }).syncGeneration,
         });
         skipped += 1;
+        this.processed += 1;
+        continue;
+      }
+      if (!await this.deps.canFetch(url)) {
+        await this.deps.saveCheck({
+          id: this.deps.newId(),
+          bookmarkId: b.id,
+          url,
+          status: 'permission_required',
+          checkedAt: this.deps.now(),
+          evidence: ['site permission is required before scanning'],
+          syncGeneration: b.syncGeneration,
+        });
+        skipped += 1;
+        this.processed += 1;
         continue;
       }
       // DNS guard before scheduling; if it fails we mark 'unsupported'.
-      const dnsCheck = await guardResolvedHost(new URL(url).hostname, this.deps.dns, { allowPrivateHosts: allowPrivate });
-      if (!dnsCheck.ok) {
+      const dnsCheck = this.deps.dns
+        ? await guardResolvedHost(new URL(url).hostname, this.deps.dns, { allowPrivateHosts: allowPrivate })
+        : null;
+      if (dnsCheck && !dnsCheck.ok) {
         await this.deps.saveCheck({
           id: this.deps.newId(),
           bookmarkId: b.id,
@@ -136,6 +172,7 @@ export class HealthService {
           evidence: [dnsCheck.reason],
         });
         skipped += 1;
+        this.processed += 1;
         continue;
       }
       items.push({ bookmarkId: b.id, url, syncGeneration: b.syncGeneration });
@@ -146,22 +183,36 @@ export class HealthService {
     const scheduler = this.makeScheduler();
     this.scheduler = scheduler;
     const added = scheduler.enqueue(items);
-    return { total: this.total, enqueued: added, skipped };
+    void scheduler.drain().then(() => {
+      if (this.scheduler === scheduler && this.status === 'running') {
+        this.status = 'completed';
+      }
+    }).catch((error: unknown) => {
+      if (this.scheduler === scheduler) {
+        this.lastError = error instanceof Error ? error.message : String(error);
+        this.status = 'failed';
+      }
+    });
+    return { total: this.total, enqueued: added, skipped, status: this.status };
   }
 
-  pause(): void { this.scheduler?.pause(); this.status = 'paused'; }
-  resume(): void { this.scheduler?.resume(); this.status = 'running'; }
+  pause(): void { if (this.status === 'running') { this.scheduler?.pause(); this.status = 'paused'; } }
+  resume(): void { if (this.status === 'paused') { this.scheduler?.resume(); this.status = 'running'; } }
   cancel(): void { this.scheduler?.cancelAll(); this.status = 'cancelled'; }
 
   snapshotStatus(): HealthServiceStatus {
-    const inflight = this.scheduler?.status().inflight ?? 0;
-    const queued = this.scheduler?.status().queued ?? 0;
+    const schedulerStatus = this.scheduler?.status();
+    const inflight = schedulerStatus?.inflight ?? 0;
+    const queued = schedulerStatus?.queued ?? 0;
     return {
       status: this.status,
       total: this.total,
       processed: this.processed,
       inflight,
       queued,
+      cancelled: schedulerStatus?.cancelled ?? 0,
+      active: schedulerStatus?.active ?? [],
+      nextEligibleAt: schedulerStatus?.nextEligibleAt ?? null,
       lastError: this.lastError,
     };
   }
@@ -170,7 +221,7 @@ export class HealthService {
     const deps = this.deps;
     const service = this;
     return new TaskScheduler({
-      probe: async (bookmarkId, url, signal): Promise<SchedulerAttemptResult> => {
+      probe: async (bookmarkId, url, attempt, signal): Promise<SchedulerAttemptResult> => {
         const clientDeps: FetchClientDeps = {
           fetch: deps.fetch,
           defaultMaxRedirects: deps.config.defaultMaxRedirects,
@@ -178,21 +229,29 @@ export class HealthService {
           defaultMaxResponseBytes: deps.config.defaultMaxResponseBytes,
           defaultUserAgent: deps.config.defaultUserAgent,
         };
-        // Try HEAD first, fall back to GET on 405/501.
-        const head = await fetchOnce(url, 'HEAD', clientDeps, { dns: deps.dns, signal });
+        // HEAD is an inexpensive positive check only. Any non-2xx or network
+        // response is confirmed with a bounded GET before classification.
+        const head = await fetchOnce(url, 'HEAD', clientDeps, { ...(deps.dns ? { dns: deps.dns } : {}), signal });
         let outcome = head;
-        if (head.httpCode > 0 && !shouldRetryAsGet(head.httpCode)) {
-          // HEAD result is fine.
-        } else {
-          const get = await fetchOnce(url, 'GET', clientDeps, { dns: deps.dns, signal });
+        let method: 'HEAD' | 'GET' = 'HEAD';
+        if (!head.redirectBlocked && (head.httpCode === 0 || shouldRetryAsGet(head.httpCode))) {
+          const get = await fetchOnce(url, 'GET', clientDeps, { ...(deps.dns ? { dns: deps.dns } : {}), signal });
           outcome = get;
+          method = 'GET';
+        }
+        if (outcome.redirectBlocked) {
+          return {
+            status: 'redirect_pending',
+            final: true,
+            evidence: [`${method} detected a redirect`, '为避免扩展在未知目标发请求，未自动跟随；请在浏览器中打开后确认'],
+          };
         }
         // Re-validate resolved host on the final URL (redirects may
         // have led us to a private address).
-        if (outcome.finalUrl) {
+        if (outcome.finalUrl && deps.dns) {
           try {
             const h = new URL(outcome.finalUrl).hostname;
-            const r2 = await guardResolvedHost(h, deps.dns);
+            const r2 = await guardResolvedHost(h, deps.dns, { allowPrivateHosts: await deps.readAllowPrivateHosts() });
             if (!r2.ok) {
               return {
                 status: 'unsupported',
@@ -206,17 +265,18 @@ export class HealthService {
         const cls = classify({
           httpCode: outcome.httpCode,
           networkError: outcome.networkError,
-          attempts: 0,
+          attempts: attempt,
           retryAfterSec: outcome.retryAfterSec,
         });
         const evidence: string[] = [];
-        if (outcome.networkError) evidence.push(`network: ${outcome.networkError}`);
+        evidence.push(`检查方式：${method}`);
+        if (outcome.networkError) evidence.push(`浏览器网络错误：${outcome.networkError}`);
         if (outcome.rawError) evidence.push(`raw: ${outcome.rawError}`);
         if (outcome.httpCode > 0) evidence.push(`${outcome.httpCode}`);
         if (outcome.finalUrl && outcome.finalUrl !== url) evidence.push(`→ ${outcome.finalUrl}`);
         return {
           status: cls.status,
-          final: true,
+          final: cls.status !== 'network_error' && cls.status !== 'suspected_dead',
           evidence,
           httpCode: outcome.httpCode || undefined,
           finalUrl: outcome.finalUrl,

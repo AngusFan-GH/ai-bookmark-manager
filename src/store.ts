@@ -95,6 +95,12 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
   async function cancelHealth(): Promise<{ status: string }> {
     return request<{ status: string }>({ type: 'HEALTH_CANCEL', requestId: reqId() });
   }
+  async function pauseHealth(): Promise<{ status: string }> {
+    return request<{ status: string }>({ type: 'HEALTH_PAUSE', requestId: reqId() });
+  }
+  async function resumeHealth(): Promise<{ status: string }> {
+    return request<{ status: string }>({ type: 'HEALTH_RESUME', requestId: reqId() });
+  }
   async function healthStatus(): Promise<HealthStatusSummary> {
     return request<HealthStatusSummary>({ type: 'HEALTH_STATUS', requestId: reqId() });
   }
@@ -110,12 +116,22 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
   async function setSetting(key: 'allowPrivateHosts', value: boolean): Promise<void> {
     return request<void>({ type: 'SETTINGS_SET', requestId: reqId(), key, value });
   }
+  async function healthPermissionStatus(): Promise<{ granted: boolean }> {
+    return request<{ granted: boolean }>({ type: 'HEALTH_PERMISSION_STATUS', requestId: reqId() });
+  }
+  async function requestHealthPermission(): Promise<{ granted: boolean }> {
+    return request<{ granted: boolean }>({ type: 'HEALTH_PERMISSION_REQUEST', requestId: reqId() });
+  }
+  async function removeHealthPermission(): Promise<{ granted: boolean }> {
+    return request<{ granted: boolean }>({ type: 'HEALTH_PERMISSION_REMOVE', requestId: reqId() });
+  }
 
   return {
     rows, folders, stats, total, loading, error,
     load, sync,
     previewImport, draftPlan, approve, execute, getPlan,
-    startHealth, cancelHealth, healthStatus, healthList,
+    startHealth, cancelHealth, pauseHealth, resumeHealth, healthStatus, healthList,
     getSetting, setSetting,
+    healthPermissionStatus, requestHealthPermission, removeHealthPermission,
   };
 });

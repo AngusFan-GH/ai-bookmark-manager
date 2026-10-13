@@ -1,6 +1,6 @@
 // src/domain/health/fetch-client.ts
 //
-// FetchClient — controlled HEAD/GET with timeout, redirects, body
+// FetchClient — controlled HEAD/GET with timeout, redirect blocking, body
 // cap, abort signal. Dev guide § 3.4 step 3:
 //
 //   - "先尝试 HEAD；405/501 或结果不可信时受控 GET；设超时、最大响应
@@ -15,12 +15,14 @@ import { guardResolvedHost, isPrivateLiteralAddress, type DnsResolver } from './
 
 export interface FetchLikeResponse {
   status: number;
-  /** Final URL after all redirects have been followed. */
+  /** Original URL; production does not automatically follow redirects. */
   url: string;
   /** Optional Retry-After (seconds) parsed from headers. */
   retryAfterSec: number | null;
   /** Optional body for a small GET (used for soft-404 detection). */
   body?: string;
+  /** The browser refused to expose a manual redirect safely. */
+  redirectBlocked?: boolean;
 }
 
 export interface FetchLikeRequest {
@@ -31,8 +33,8 @@ export interface FetchLikeRequest {
   maxResponseBytes: number;
   userAgent: string;
   signal?: AbortSignal;
-  /** Resolver used to defend against DNS-based SSRF. */
-  dns: DnsResolver;
+  /** Optional platform DNS resolver. Browser extensions normally lack one. */
+  dns?: DnsResolver;
 }
 
 export type FetchLikeFn = (req: FetchLikeRequest) => Promise<FetchLikeResponse>;
@@ -40,11 +42,11 @@ export type FetchLikeFn = (req: FetchLikeRequest) => Promise<FetchLikeResponse>;
 export type FetchNetworkErrorStage = 'dns' | 'tcp' | 'tls' | 'abort' | 'unknown';
 
 export interface FetchAttemptOutcome {
-  /** HTTP status (after redirects) or 0 if no response received. */
+  /** HTTP status or 0 if no response received. */
   httpCode: number;
-  /** Final URL after redirects (or the original URL if no redirect). */
+  /** URL used for this request (the original URL in production). */
   finalUrl: string;
-  /** Number of redirects followed. */
+  /** Number of redirects followed by the injected implementation. */
   redirectCount: number;
   /** Network-layer error stage, or null. */
   networkError: FetchNetworkErrorStage | null;
@@ -58,6 +60,8 @@ export interface FetchAttemptOutcome {
   body?: string;
   /** Retry-After (seconds) from the final response. */
   retryAfterSec: number | null;
+  /** True when a redirect target could not be inspected safely. */
+  redirectBlocked?: boolean;
 }
 
 export interface FetchClientDeps {
@@ -84,22 +88,24 @@ export async function fetchOnce(
   const maxResponseBytes = opts.maxResponseBytes ?? deps.defaultMaxResponseBytes;
   const userAgent = opts.userAgent ?? deps.defaultUserAgent;
   const signal = opts.signal;
-  // Provide a default no-op DNS resolver for tests/callers that
-  // pass opts without one. Production callers wire a real `dns.lookup`.
-  const dns: DnsResolver = opts.dns ?? { lookup: async () => [] };
+  const dns = opts.dns;
 
-  // Defensive DNS check (best-effort).
-  const host = new URL(url).hostname;
-  const dnsCheck = await guardResolvedHost(host, dns);
-  if (!dnsCheck.ok) {
-    return {
-      httpCode: 0,
-      finalUrl: url,
-      redirectCount: 0,
-      networkError: 'dns',
-      rawError: dnsCheck.reason,
-      retryAfterSec: null,
-    };
+  // A browser extension has no portable Node-style DNS API. Only perform a
+  // DNS check when a platform resolver is explicitly supplied; do not treat
+  // an empty fallback result as proof that a host is public.
+  if (dns) {
+    const host = new URL(url).hostname;
+    const dnsCheck = await guardResolvedHost(host, dns);
+    if (!dnsCheck.ok) {
+      return {
+        httpCode: 0,
+        finalUrl: url,
+        redirectCount: 0,
+        networkError: 'dns',
+        rawError: dnsCheck.reason,
+        retryAfterSec: null,
+      };
+    }
   }
 
   const ac = new AbortController();
@@ -109,16 +115,17 @@ export async function fetchOnce(
   }
   try {
     const resp = await deps.fetch({
-      method, url, timeoutMs, maxRedirects, maxResponseBytes, userAgent, signal: ac.signal, dns,
+      method, url, timeoutMs, maxRedirects, maxResponseBytes, userAgent, signal: ac.signal, ...(dns ? { dns } : {}),
     });
     return {
       httpCode: resp.status,
       finalUrl: resp.url,
-      redirectCount: 0, // the real fetch impl is responsible for following redirects
+      redirectCount: 0, // production uses manual redirect handling
       networkError: null,
       rawError: '',
       body: resp.body,
       retryAfterSec: resp.retryAfterSec,
+      ...(resp.redirectBlocked ? { redirectBlocked: true } : {}),
     };
   } catch (err) {
     const stage = mapErrorStage(err);
@@ -212,11 +219,10 @@ function mapErrorStage(err: unknown): FetchNetworkErrorStage {
  * exercise it without any network I/O.
  */
 export function shouldRetryAsGet(httpCode: number): boolean {
-  // 405 (method not allowed) and 501 (not implemented) are the two
-  // well-known "HEAD is not a thing on this server" responses. Some
-  // servers also return 403 on HEAD (bot protection). We do NOT
-  // re-attempt on 403 — that's a deliberate "go away" response.
-  return httpCode === 405 || httpCode === 501;
+  // HEAD is only a cheap positive signal. A non-2xx answer often reflects a
+  // method-specific rule in a CDN/WAF rather than what a user sees on GET, so
+  // it must be confirmed by one bounded GET before we classify the bookmark.
+  return httpCode < 200 || httpCode >= 300;
 }
 
 /**
@@ -230,7 +236,7 @@ export async function probeUrl(
   opts: Partial<FetchLikeRequest> = {},
 ): Promise<{ outcome: FetchAttemptOutcome; method: 'HEAD' | 'GET' }> {
   const head = await fetchOnce(url, 'HEAD', deps, opts);
-  if (head.httpCode > 0 && !shouldRetryAsGet(head.httpCode)) {
+  if (head.redirectBlocked || (head.httpCode > 0 && !shouldRetryAsGet(head.httpCode))) {
     return { outcome: head, method: 'HEAD' };
   }
   // HEAD failed or was uninformative; try GET (still bounded).

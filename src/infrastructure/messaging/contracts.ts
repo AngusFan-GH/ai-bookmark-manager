@@ -150,7 +150,7 @@ export interface HealthRunSummary {
   total: number;
   enqueued: number;
   skipped: number;
-  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
 }
 
 export type HealthStartRequest = {
@@ -160,8 +160,13 @@ export type HealthStartRequest = {
 };
 
 export type HealthCancelRequest = { type: 'HEALTH_CANCEL'; requestId: string };
+export type HealthPauseRequest = { type: 'HEALTH_PAUSE'; requestId: string };
+export type HealthResumeRequest = { type: 'HEALTH_RESUME'; requestId: string };
 export type HealthStatusRequest = { type: 'HEALTH_STATUS'; requestId: string };
 export type HealthListRequest = { type: 'HEALTH_LIST'; requestId: string };
+export type HealthPermissionStatusRequest = { type: 'HEALTH_PERMISSION_STATUS'; requestId: string };
+export type HealthPermissionRequest = { type: 'HEALTH_PERMISSION_REQUEST'; requestId: string };
+export type HealthPermissionRemoveRequest = { type: 'HEALTH_PERMISSION_REMOVE'; requestId: string };
 
 /**
  * Phase 3.5: per-extension setting that allows the URL guard to
@@ -185,6 +190,10 @@ export interface HealthStatusSummary {
   inflight: number;
   total: number;
   processed: number;
+  cancelled: number;
+  active: Array<{ bookmarkId: string; url: string }>;
+  nextEligibleAt: number | null;
+  lastError: string | null;
 }
 
 export type BackgroundRequest =
@@ -202,8 +211,13 @@ export type BackgroundRequest =
   | ExecuteRequest
   | HealthStartRequest
   | HealthCancelRequest
+  | HealthPauseRequest
+  | HealthResumeRequest
   | HealthStatusRequest
   | HealthListRequest
+  | HealthPermissionStatusRequest
+  | HealthPermissionRequest
+  | HealthPermissionRemoveRequest
   | SettingsSetRequest
   | SettingsGetRequest;
 

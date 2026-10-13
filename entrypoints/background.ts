@@ -27,7 +27,6 @@ import { PlanService } from '../src/domain/operations/plan-service';
 import type { Approval } from '../src/domain/operations/types';
 import { HealthService } from '../src/domain/health/service';
 import { DEFAULT_HEALTH_CONFIG } from '../src/domain/health/types';
-import { createBrowserDnsResolver } from '../src/infrastructure/network/dns-resolver';
 import type { LinkCheckRecord } from '../src/domain/health/types';
 import {
   ok,
@@ -71,6 +70,60 @@ function writeAllowPrivateHostsFlag(v: boolean): void {
   // symmetry (e.g. future inline toggles). Storage writes are
   // observed by other service-worker starts automatically.
   try { chrome.storage?.local?.set({ allowPrivateHosts: v }); } catch { /* ignore */ }
+}
+
+const HEALTH_HOST_PATTERNS = ['http://*/*', 'https://*/*'];
+
+function healthOriginPattern(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return `${url.protocol}//${url.hostname}/*`;
+  } catch {
+    return null;
+  }
+}
+
+function containsHealthPermission(rawUrl: string): Promise<boolean> {
+  const origin = healthOriginPattern(rawUrl);
+  if (!origin) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    chrome.permissions.contains({ origins: [origin] }, (granted) => {
+      resolve(chrome.runtime.lastError ? false : granted);
+    });
+  });
+}
+
+function requestHealthPermission(): Promise<boolean> {
+  return new Promise((resolve) => {
+    chrome.permissions.request({ origins: HEALTH_HOST_PATTERNS }, (granted) => {
+      resolve(chrome.runtime.lastError ? false : granted);
+    });
+  });
+}
+
+function removeHealthPermission(): Promise<boolean> {
+  return new Promise((resolve) => {
+    chrome.permissions.remove({ origins: HEALTH_HOST_PATTERNS }, (removed) => {
+      resolve(chrome.runtime.lastError ? false : removed);
+    });
+  });
+}
+
+function healthPermissionStatus(): Promise<boolean> {
+  return new Promise((resolve) => {
+    chrome.permissions.contains({ origins: HEALTH_HOST_PATTERNS }, (granted) => {
+      resolve(chrome.runtime.lastError ? false : granted);
+    });
+  });
+}
+
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds;
+  const at = Date.parse(header);
+  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - Date.now()) / 1000));
 }
 
 /**
@@ -204,8 +257,13 @@ export default defineBackground(() => {
     // Phase 3: link health
     startHealth: (bookmarkIds?: string[]) => healthService.start(bookmarkIds) as unknown as Promise<HealthRunSummary>,
     cancelHealth: () => { healthService.cancel(); return Promise.resolve({ status: 'cancelled' }); },
+    pauseHealth: () => { healthService.pause(); return Promise.resolve({ status: 'paused' }); },
+    resumeHealth: () => { healthService.resume(); return Promise.resolve({ status: 'running' }); },
     healthStatus: () => healthService.snapshotStatus() as unknown as Promise<HealthStatusSummary>,
     listHealth: () => healthService.snapshot() as unknown as Promise<unknown[]>,
+    healthPermissionStatus: async () => ({ granted: await healthPermissionStatus() }),
+    requestHealthPermission: async () => ({ granted: await requestHealthPermission() }),
+    removeHealthPermission: async () => ({ granted: await removeHealthPermission() }),
     getSetting: (_key: 'allowPrivateHosts') => Promise.resolve(readAllowPrivateHostsFlag()),
     setSetting: (_key: 'allowPrivateHosts', value: boolean) => {
       writeAllowPrivateHostsFlag(value);
@@ -233,8 +291,13 @@ export default defineBackground(() => {
     .register('EXECUTE', (req) => deps.executePlan(req.planId, req.approvalToken, req.dryRun))
     .register('HEALTH_START', (req) => deps.startHealth(req.bookmarkIds))
     .register('HEALTH_CANCEL', () => deps.cancelHealth())
+    .register('HEALTH_PAUSE', () => deps.pauseHealth())
+    .register('HEALTH_RESUME', () => deps.resumeHealth())
     .register('HEALTH_STATUS', () => deps.healthStatus())
     .register('HEALTH_LIST', () => deps.listHealth())
+    .register('HEALTH_PERMISSION_STATUS', () => deps.healthPermissionStatus())
+    .register('HEALTH_PERMISSION_REQUEST', () => deps.requestHealthPermission())
+    .register('HEALTH_PERMISSION_REMOVE', () => deps.removeHealthPermission())
     .register('SETTINGS_GET', (req) => deps.getSetting(req.key))
     .register('SETTINGS_SET', (req) => deps.setSetting(req.key, req.value));
 
@@ -298,7 +361,6 @@ export default defineBackground(() => {
   // Link health scan facade. Reads bookmarks from Dexie, runs the
   // FetchClient (with HEAD→GET fallback) per item via the
   // TaskScheduler, persists results to the linkChecks store.
-  const dnsResolver = createBrowserDnsResolver();
   // Pause flag — the service is constructed with a closure that
   // reads this flag, avoiding the self-referential initializer.
   let healthPaused = false;
@@ -310,7 +372,7 @@ export default defineBackground(() => {
     listBookmarks: async () => db.bookmarks.toArray(),
     latestChecks: async () => db.linkChecks.toArray(),
     saveCheck: async (rec: LinkCheckRecord) => { await db.linkChecks.put(rec); },
-    dns: dnsResolver,
+    canFetch: containsHealthPermission,
     fetch: async (req) => {
       // Real browser fetch. AbortSignal is honored. Response body is
       // capped at req.maxResponseBytes.
@@ -320,11 +382,15 @@ export default defineBackground(() => {
       try {
         const res = await fetch(req.url, {
           method: req.method,
-          redirect: 'follow',
+          // Never allow the browser to silently follow a redirect to a host
+          // that has not gone through our static guard and permission check.
+          redirect: 'manual',
           signal: ac.signal,
-          headers: { 'user-agent': req.userAgent },
         });
-        const retryAfter = res.headers.get('retry-after');
+        if (res.type === 'opaqueredirect') {
+          return { status: 0, url: req.url, retryAfterSec: null, redirectBlocked: true };
+        }
+        const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
         let body: string | undefined;
         if (req.method === 'GET' && res.body) {
           const reader = res.body.getReader();
@@ -345,7 +411,7 @@ export default defineBackground(() => {
         return {
           status: res.status,
           url: res.url,
-          retryAfterSec: retryAfter ? Number(retryAfter) : null,
+          retryAfterSec: retryAfter,
           ...(body !== undefined ? { body } : {}),
         };
       } finally {

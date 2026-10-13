@@ -134,6 +134,8 @@ export interface Approval {
   issuedAt: number;
   /** How long the token is valid (ms). */
   ttlMs: number;
+  /** SHA-256 of the plan fields that were displayed at approval time. */
+  planHash: string | null;
   /**
    * One-time secret the user must type / re-confirm for high-risk
    * plans. Stored hashed, never in plaintext. The executor compares

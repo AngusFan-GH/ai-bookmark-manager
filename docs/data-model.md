@@ -5,7 +5,7 @@
 > (the canonical `bookmarks` + `folders` stores, the `meta.syncState`
 > row, and the `syncGeneration` per-row counter).
 
-## 1. Stores (Dexie schema v3)
+## 1. Stores (Dexie schema v4)
 
 | store      | primary key | indexes                                                                                              | contents              | phase |
 | ---------- | ----------- | ---------------------------------------------------------------------------------------------------- | --------------------- | ----- |
@@ -16,15 +16,16 @@
 | `operationSteps` | `id` | `planId, status, targetBrowserId, [planId+order]`                                                  | `OperationStep` rows  | 2 |
 | `snapshots` | `id`        | `planId, createdAt, syncGeneration`                                                                  | `TreeSnapshot` rows   | 2 |
 | `audit`     | `id`        | `planId, stepId, recordedAt`                                                                          | append-only audit log | 2 |
+| `linkChecks` | `id` | `bookmarkId, status, checkedAt, [bookmarkId+checkedAt], retryAt` | link-health observations; v4 adds optional original `url` | 3 / 4 |
 
-Future stores (linkChecks, contents, classifications, tasks,
+Future stores (contents, classifications, tasks,
 settings, chatSessions, chatMessages) are added in their respective
 phases via `migrations.ts` and bump the schema version.
 
-The v1 → v2 migration is purely additive (no `.upgrade()` body is
-needed when only adding tables). Dexie handles the upgrade
-automatically. `tests/integration/migrations.test.ts` round-trips a
-v1 DB through the v2 open path to confirm bookmarks persist.
+The v1 → v4 migrations are additive. Dexie handles the table additions;
+v4 adds the optional `url` field to `linkChecks` without changing its
+indexes. `tests/integration/migrations.test.ts` verifies each upgrade
+path and confirms existing bookmark data persists.
 
 ## 2. Types
 
@@ -141,9 +142,9 @@ Dexie migrations are managed in
 `tests/integration/migrations.test.ts` that simulates a v(N-1) DB and
 verifies the upgrade.
 
-Phase 1's contribution:
+The currently implemented migration baseline:
 
-- `migrations.ts` exports `SCHEMA_V1` (the index strings) and
+- `migrations.ts` exports `SCHEMA_V1` through `SCHEMA_V4` and
   `createTestDatabase(name)` for tests.
-- `migrations.test.ts` round-trips 50 rows through v1 to lock in the
-  schema and the per-row fields.
+- `migrations.test.ts` verifies v1–v4 upgrades, including preservation
+  of Phase 2 plan data and Phase 3 link-health rows.
