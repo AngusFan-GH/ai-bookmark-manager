@@ -19,6 +19,15 @@ type HealthRow = {
   status: LinkStatus;
   httpCode?: number;
   finalUrl?: string;
+  /**
+   * Phase 3.6: the **original** URL the user asked us to scan. For
+   * pre-v4 rows (and for some redirected rows where we have only
+   * finalUrl) this is undefined; the UI falls back to finalUrl.
+   * Crucial for the "unsupported" case: those rows never reach the
+   * fetch client, so finalUrl is always missing — without `url`
+   * the link cell would be unclickable.
+   */
+  url?: string;
   checkedAt: number;
   evidence: string[];
   syncGeneration?: number;
@@ -191,11 +200,38 @@ onMounted(() => { void loadSetting(); void refresh(); });
       </el-table-column>
       <el-table-column prop="bookmarkId" label="书签 ID" width="200" show-overflow-tooltip />
       <el-table-column label="HTTP" width="80">
-        <template #default="{ row }">{{ row.httpCode || '—' }}</template>
+        <template #default="{ row }">{{ (row as HealthRow).httpCode || '—' }}</template>
       </el-table-column>
-      <el-table-column prop="finalUrl" label="最终 URL" min-width="280" show-overflow-tooltip />
+      <el-table-column label="URL" min-width="300" show-overflow-tooltip>
+        <template #default="{ row }">
+          <!--
+            Phase 3.6: prefer the original URL the user bookmarked
+            (so unsupported rows are clickable too). Fall back to
+            finalUrl for pre-v4 rows. A plain <a target="_blank"
+            rel="noopener noreferrer"> works for any http/https URL
+            in an extension page; for chrome:// / file:// the user
+            gets the browser's default behaviour (open in new tab
+            for valid schemes; ignored otherwise).
+          -->
+          <a
+            v-if="(row as HealthRow).url || (row as HealthRow).finalUrl"
+            :href="(row as HealthRow).url || (row as HealthRow).finalUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="url-link"
+          >{{ (row as HealthRow).url || (row as HealthRow).finalUrl }}</a>
+          <span v-else class="muted">—</span>
+          <!-- If the row was redirected, show a small hint that
+               the finalUrl differs from the bookmarked URL. -->
+          <span
+            v-if="(row as HealthRow).url && (row as HealthRow).finalUrl
+                 && (row as HealthRow).url !== (row as HealthRow).finalUrl"
+            class="muted small redirect-hint"
+          > → {{ (row as HealthRow).finalUrl }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="证据" min-width="200" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.evidence.join(' · ') }}</template>
+        <template #default="{ row }">{{ (row as HealthRow).evidence.join(' · ') }}</template>
       </el-table-column>
       <el-table-column label="检测时间" width="170">
         <template #default="{ row }">{{ new Date(row.checkedAt).toLocaleString() }}</template>
@@ -211,6 +247,13 @@ onMounted(() => { void loadSetting(); void refresh(); });
 
 <style scoped>
 .muted { color: #8490a3; }
+.url-link {
+  color: #2563eb;
+  text-decoration: none;
+  word-break: break-all;
+}
+.url-link:hover { text-decoration: underline; }
+.redirect-hint { margin-left: 6px; word-break: break-all; }
 .small { font-size: 12px; }
 .health-head { display: flex; align-items: flex-start; justify-content: space-between; }
 .health-head h2 { margin: 0 0 6px; font-size: 18px; }

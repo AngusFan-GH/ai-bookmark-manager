@@ -66,6 +66,22 @@ export class BookmarkDatabase extends Dexie {
       audit: 'id, planId, stepId, recordedAt',
       linkChecks: 'id, bookmarkId, status, checkedAt, [bookmarkId+checkedAt], retryAt',
     });
+    // v4: linkChecks gets a `url` field (the original bookmarked URL,
+    // not the post-redirect finalUrl). Existing rows have `url: undefined`,
+    // which is fine — the UI falls back to `finalUrl` when `url` is
+    // missing. We do not add a new index because we always look up
+    // by bookmarkId, never by raw URL.
+    this.version(4).stores({
+      bookmarks:
+        'id, browserId, parentId, kind, title, url, [parentId+index], updatedAt, syncGeneration',
+      folders: 'id, browserId, parentId, title, [parentId+index], updatedAt, syncGeneration',
+      meta: 'key, updatedAt',
+      plans: 'id, status, createdAt, basedOnGeneration',
+      operationSteps: 'id, planId, status, targetBrowserId, [planId+order]',
+      snapshots: 'id, planId, createdAt, syncGeneration',
+      audit: 'id, planId, stepId, recordedAt',
+      linkChecks: 'id, bookmarkId, status, checkedAt, [bookmarkId+checkedAt], retryAt',
+    });
   }
 }
 

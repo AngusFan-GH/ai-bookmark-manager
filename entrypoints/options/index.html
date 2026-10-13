@@ -1,1 +1,20 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>AI Bookmark Manager</title></head><body><div id="app"></div><script type="module" src="./main.ts"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>AI Bookmark Manager</title>
+    <!--
+      Open the options page in a real Chrome tab (not the embedded
+      iframe on chrome://extensions). This makes the URL bar
+      visible, lets the user bookmark it, supports deep links
+      like #health, and matches the user's mental model: the
+      options page IS a tab, not a popup.
+    -->
+    <meta name="manifest.open_in_tab" content="true" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

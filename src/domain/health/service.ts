@@ -38,6 +38,13 @@ export interface HealthServiceDeps {
   fetch: FetchLikeFn;
   /** Config knobs. */
   config: { defaultTimeoutMs: number; defaultMaxRedirects: number; defaultMaxResponseBytes: number; defaultUserAgent: string; globalConcurrency: number; perHostConcurrency: number; maxRetries: number; allowPrivateHosts: boolean };
+  /**
+   * Live re-read of the `allowPrivateHosts` flag. Called by
+   * `start()` so the next scan sees the user's latest setting
+   * without a service-worker restart. Resolves to false when
+   * storage is unavailable (tests, first launch).
+   */
+  readAllowPrivateHosts(): Promise<boolean>;
   /** Wall-clock. */
   now(): number;
   /** Fresh id (uuid v4). */
@@ -96,7 +103,10 @@ export class HealthService {
       : all.filter((b) => b.url);
     const items: SchedulerInputItem[] = [];
     let skipped = 0;
-    const allowPrivate = this.deps.config.allowPrivateHosts === true;
+    // Live re-read of the toggle. Reads chrome.storage on every
+    // `start()` so a flag change takes effect on the very next
+    // scan, even if the service worker has not been restarted.
+    const allowPrivate = await this.deps.readAllowPrivateHosts();
     for (const b of filtered) {
       const url = b.url!;
       const guard = guardUrl(url, { allowPrivateHosts: allowPrivate });
@@ -105,6 +115,7 @@ export class HealthService {
         await this.deps.saveCheck({
           id: this.deps.newId(),
           bookmarkId: b.id,
+          url,
           status: 'unsupported',
           checkedAt: this.deps.now(),
           evidence: [guard.reason, ...(allowPrivate ? [] : ['toggle on to scan private hosts'])],
@@ -119,6 +130,7 @@ export class HealthService {
         await this.deps.saveCheck({
           id: this.deps.newId(),
           bookmarkId: b.id,
+          url,
           status: 'unsupported',
           checkedAt: this.deps.now(),
           evidence: [dnsCheck.reason],

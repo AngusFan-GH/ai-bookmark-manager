@@ -43,6 +43,18 @@ export interface SchemaV3Stores extends SchemaV2Stores {
   linkChecks: string;
 }
 
+export interface SchemaV4Stores extends SchemaV3Stores {
+  /**
+   * Same index list as v3; the v4 migration just makes the `url`
+   * field part of `LinkCheckRecord`. Dexie does not require a new
+   * index for the new field — the table is keyed by `id` and we
+   * always look up by `bookmarkId`. v4 only exists to anchor the
+   * version number so a v3 user who reloads the extension gets a
+   * guaranteed upgrade.
+   */
+  linkChecks: string;
+}
+
 export const SCHEMA_V1: SchemaV1Stores = {
   bookmarks:
     'id, browserId, parentId, kind, title, url, [parentId+index], updatedAt, syncGeneration',
@@ -63,12 +75,20 @@ export const SCHEMA_V3: SchemaV3Stores = {
   linkChecks: 'id, bookmarkId, status, checkedAt, [bookmarkId+checkedAt], retryAt',
 };
 
+export const SCHEMA_V4: SchemaV4Stores = {
+  ...SCHEMA_V3,
+  // The `url` field on `LinkCheckRecord` is a free-form property
+  // (not a Dexie index), so the index string is identical to v3.
+  // This entry exists purely to anchor the schema version number.
+  linkChecks: SCHEMA_V3.linkChecks,
+};
+
 /**
  * Build a fresh Dexie database bound to a unique name at a given
  * schema version. Used by tests so each test scenario starts from a
  * clean slate without touching the real chrome-extension IndexedDB.
  */
-export function createTestDatabase(name: string, schemaVersion: 1 | 2 | 3 = 3): Dexie & {
+export function createTestDatabase(name: string, schemaVersion: 1 | 2 | 3 | 4 = 4): Dexie & {
   bookmarks: Table<BookmarkRecord, string>;
   folders: Table<FolderRecord, string>;
   meta: Table<MetaRecord, string>;
@@ -116,10 +136,25 @@ export function createTestDatabase(name: string, schemaVersion: 1 | 2 | 3 = 3): 
       linkChecks: SCHEMA_V3.linkChecks,
     });
   }
+  if (schemaVersion >= 4) {
+    // v4: same index list as v3, just re-anchored to surface the
+    // schema version bump. Existing rows survive without an
+    // `.upgrade()` callback because `url` is a non-indexed field.
+    d.version(4).stores({
+      bookmarks: SCHEMA_V4.bookmarks,
+      folders: SCHEMA_V4.folders,
+      meta: SCHEMA_V4.meta,
+      plans: SCHEMA_V4.plans,
+      operationSteps: SCHEMA_V4.operationSteps,
+      snapshots: SCHEMA_V4.snapshots,
+      audit: SCHEMA_V4.audit,
+      linkChecks: SCHEMA_V4.linkChecks,
+    });
+  }
   return d;
 }
 
 /**
  * Current schema version. Bumped when a new migration lands.
  */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;

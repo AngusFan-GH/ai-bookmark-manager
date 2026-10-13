@@ -45,19 +45,31 @@ type BookmarkTreeNode = chrome.bookmarks.BookmarkTreeNode;
 
 /**
  * Read the `allowPrivateHosts` flag from chrome.storage.local.
- * Defaults to false (dev guide § 0.1). Cached at module-init time
- * because the service worker is short-lived and re-reads the flag
- * at every health start.
+ * Defaults to false (dev guide § 0.1). We do NOT cache at
+ * module-init: the service worker can be suspended at any time and
+ * re-reads from storage on every read. The previous design
+ * (`let ALLOW_PRIVATE_HOSTS = false` + fire-and-forget get) lost
+ * the user's setting because the in-memory copy was initialized
+ * before the async storage read resolved, and subsequent writes
+ * updated the storage but not necessarily the cached value the
+ * next time the worker spun up.
  */
-let ALLOW_PRIVATE_HOSTS = false;
-try {
-  chrome.storage?.local?.get(['allowPrivateHosts'], (data) => {
-    ALLOW_PRIVATE_HOSTS = data?.allowPrivateHosts === true;
+async function readAllowPrivateHostsFlag(): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage?.local?.get(['allowPrivateHosts'], (data) => {
+        resolve(data?.allowPrivateHosts === true);
+      });
+    } catch {
+      resolve(false);
+    }
   });
-} catch { /* storage may be unavailable in tests; default is false */ }
-function readAllowPrivateHostsFlag(): boolean { return ALLOW_PRIVATE_HOSTS; }
+}
+
 function writeAllowPrivateHostsFlag(v: boolean): void {
-  ALLOW_PRIVATE_HOSTS = v;
+  // The UI side already calls SETTINGS_SET; we also write here for
+  // symmetry (e.g. future inline toggles). Storage writes are
+  // observed by other service-worker starts automatically.
   try { chrome.storage?.local?.set({ allowPrivateHosts: v }); } catch { /* ignore */ }
 }
 
@@ -290,6 +302,10 @@ export default defineBackground(() => {
   // Pause flag — the service is constructed with a closure that
   // reads this flag, avoiding the self-referential initializer.
   let healthPaused = false;
+  // The service worker is suspended at any time; the user may toggle
+  // `allowPrivateHosts` while we are alive. We resolve the flag
+  // fresh on every `startHealth` so the next scan sees the new
+  // value without needing a worker restart.
   const healthService: HealthService = new HealthService({
     listBookmarks: async () => db.bookmarks.toArray(),
     latestChecks: async () => db.linkChecks.toArray(),
@@ -344,12 +360,16 @@ export default defineBackground(() => {
       globalConcurrency: DEFAULT_HEALTH_CONFIG.globalConcurrency,
       perHostConcurrency: DEFAULT_HEALTH_CONFIG.perHostConcurrency,
       maxRetries: DEFAULT_HEALTH_CONFIG.maxRetries,
-      // Phase 3.5: the user can opt in to scanning private hosts via
-      // the HealthView's settings card. Persisted in Dexie meta.
-      // For now we read it from a localStorage flag because Phase 4+
-      // is going to replace this with a proper settings store.
-      allowPrivateHosts: readAllowPrivateHostsFlag(),
+      // The static snapshot is still passed for code paths that
+      // don't need a live re-read (e.g. snapshot status). The
+      // service's `start()` calls `readAllowPrivateHosts()` itself
+      // to pick up the user's latest toggle.
+      allowPrivateHosts: false,
     },
+    // Re-reads chrome.storage on every call. The service worker may
+    // have been alive for a long time; the in-memory snapshot is
+    // never used by the gating path.
+    readAllowPrivateHosts: () => readAllowPrivateHostsFlag(),
     now: () => Date.now(),
     newId,
     isPaused: () => healthPaused,

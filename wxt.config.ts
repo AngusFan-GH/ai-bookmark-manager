@@ -37,6 +37,10 @@ export default defineConfig({
     // able to jump to the link-health tab with a single keyboard
     // shortcut. Alt+H is the proposed default (Alt+R is reserved by
     // WXT for "reload extension during development").
+    //
+    // NOTE: `options_ui.open_in_tab` is configured via the meta tag
+    // in entrypoints/options/index.html (`manifest.open_in_tab`).
+    // WXT reads that meta tag and writes the manifest field for us.
     commands: {
       'open-link-health': {
         suggested_key: { default: 'Alt+H' },

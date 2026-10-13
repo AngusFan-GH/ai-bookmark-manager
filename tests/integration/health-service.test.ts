@@ -50,6 +50,7 @@ function makeDeps(overrides: Partial<HealthDeps> = {}): HealthDeps {
     now: () => Date.now(),
     newId,
     isPaused: () => false,
+    readAllowPrivateHosts: async () => false,
     ...overrides,
   };
 }

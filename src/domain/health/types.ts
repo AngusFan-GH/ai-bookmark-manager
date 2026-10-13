@@ -34,6 +34,19 @@ export interface LinkCheckRecord {
   status: LinkStatus;
   httpCode?: number;
   finalUrl?: string;
+  /**
+   * Phase 3.6: the **original** URL the user asked us to scan, as
+   * captured from `chrome.bookmarks`. We previously only stored
+   * `finalUrl` (post-redirect), which is wrong for the "unsupported"
+   * case — those never reach the fetch client, so they never had a
+   * finalUrl. The UI now shows the user the exact address they
+   * bookmarked so they can:
+   *   - see the literal 192.168.x.x that was rejected
+   *   - click it to open the address in a new tab for manual
+   *     verification (the only legal way to reach a private host
+   *     when the toggle is off)
+   */
+  url?: string;
   errorCode?: string;
   checkedAt: number;
   retryAt?: number;

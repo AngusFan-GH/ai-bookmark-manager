@@ -182,6 +182,12 @@ export class TaskScheduler {
             const rec: LinkCheckRecord = {
               id: this.deps.newId(),
               bookmarkId: it.bookmarkId,
+              // Original URL the user asked us to scan (not the
+              // post-redirect finalUrl). Persisted so the UI can
+              // show the literal address that was rejected /
+              // scanned, and let the user click it to open a new
+              // tab for manual verification.
+              url: it.url,
               status: result.status,
               httpCode: result.httpCode,
               finalUrl: result.finalUrl,
