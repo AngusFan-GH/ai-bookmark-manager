@@ -1,0 +1,6 @@
+{
+  "name": "ai-bookmark-manager", "version": "0.1.0", "private": true, "type": "module",
+  "scripts": {"dev": "wxt", "build": "wxt build", "zip": "wxt zip", "typecheck": "vue-tsc --noEmit -p tsconfig.json", "test": "vitest run"},
+  "dependencies": {"@element-plus/icons-vue": "^2.3.1", "dexie": "^4.0.11", "element-plus": "^2.9.5", "pinia": "^3.0.1", "vue": "^3.5.13"},
+  "devDependencies": {"@types/chrome": "^0.0.300", "@vitejs/plugin-vue": "^5.2.1", "typescript": "^5.8.2", "vite": "^6.2.1", "vitest": "^3.0.8", "vue-tsc": "^2.2.8", "wxt": "^0.20.0"}
+}
