@@ -144,6 +144,33 @@ export interface ExecuteResultMsg {
   compensated: number;
 }
 
+// ---- Phase 3: link health -----------------------------------------------
+
+export interface HealthRunSummary {
+  total: number;
+  enqueued: number;
+  skipped: number;
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
+}
+
+export type HealthStartRequest = {
+  type: 'HEALTH_START';
+  requestId: string;
+  bookmarkIds?: string[]; // omit = scan all bookmarks
+};
+
+export type HealthCancelRequest = { type: 'HEALTH_CANCEL'; requestId: string };
+export type HealthStatusRequest = { type: 'HEALTH_STATUS'; requestId: string };
+export type HealthListRequest = { type: 'HEALTH_LIST'; requestId: string };
+
+export interface HealthStatusSummary {
+  status: 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  queued: number;
+  inflight: number;
+  total: number;
+  processed: number;
+}
+
 export type BackgroundRequest =
   | BookmarkListRequest
   | BookmarkTreeRequest
@@ -156,7 +183,11 @@ export type BackgroundRequest =
   | PlanListRequest
   | PlanGetRequest
   | ApprovalRequest
-  | ExecuteRequest;
+  | ExecuteRequest
+  | HealthStartRequest
+  | HealthCancelRequest
+  | HealthStatusRequest
+  | HealthListRequest;
 
 // ---- Responses ------------------------------------------------------------
 

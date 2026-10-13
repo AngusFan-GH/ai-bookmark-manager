@@ -5,12 +5,14 @@ import { useBookmarkStore } from '../../src/store';
 import { request } from '../../src/client';
 import type { FolderRecord } from '../../src/domain/bookmarks/types';
 import ImportFlow from './components/ImportFlow.vue';
+import HealthView from './components/HealthView.vue';
 
 const store = useBookmarkStore();
 const query = ref('');
 const folderId = ref('');
 const page = ref(1);
 const syncing = ref(false);
+const activeTab = ref<'bookmarks' | 'health'>('bookmarks');
 let debounce: ReturnType<typeof setTimeout> | undefined;
 const folders = computed(() =>
   store.folders
@@ -60,20 +62,27 @@ onMounted(async () => {
       <el-card shadow="never"><div class="number">{{ store.stats.folders }}</div><span>目录节点</span></el-card>
       <el-card shadow="never"><div class="date">{{ store.stats.lastSync ? new Date(store.stats.lastSync).toLocaleString() : '尚未同步' }}</div><span>最近同步</span></el-card>
     </div>
-    <el-card shadow="never" class="main">
-      <div class="toolbar"><el-input v-model="query" clearable placeholder="搜索标题、URL、目录路径" style="max-width:420px"/>
-        <el-select v-model="folderId" filterable style="width:300px" placeholder="选择目录"><el-option label="全部目录" value=""/><el-option v-for="f in folders" :key="f.id" :value="f.id" :label="`${f.path ? f.path + ' / ' : ''}${f.title}`"/></el-select>
-      </div>
-      <el-alert v-if="store.error" :title="store.error" type="error" show-icon :closable="false"/>
-      <el-table :data="store.rows" v-loading="store.loading" stripe height="min(60vh,650px)" row-key="id">
-        <el-table-column label="标题" min-width="240"><template #default="{row}"><span class="kind">{{ row.kind === 'folder' ? '📁' : '🔖' }}</span>{{ row.title || '(无标题)' }}</template></el-table-column>
-        <el-table-column prop="path" label="目录路径" min-width="220" show-overflow-tooltip/>
-        <el-table-column label="URL" min-width="300" show-overflow-tooltip><template #default="{row}"><a v-if="row.url && /^https?:\/\//i.test(row.url)" :href="row.url" target="_blank" rel="noopener noreferrer">{{ row.url }}</a><span v-else>{{ row.url || '—' }}</span></template></el-table-column>
-        <el-table-column label="添加时间" width="175"><template #default="{row}">{{ row.dateAdded ? new Date(row.dateAdded).toLocaleString() : '—' }}</template></el-table-column>
-      </el-table>
-      <div class="footer"><span>共 {{ store.total }} 条（每页 200 条）</span><el-pagination v-model:current-page="page" :page-size="200" layout="prev, pager, next" :total="store.total"/></div>
-    </el-card>
-    <p class="notice">导入 JSON 备份是受控操作：仅在批准后才写入浏览器。删除操作会要求二次确认。所有写入由 OperationExecutor 统一执行并产生审计日志。</p>
+    <el-tabs v-model="activeTab">
+      <el-tab-pane label="书签" name="bookmarks">
+        <el-card shadow="never" class="main">
+          <div class="toolbar"><el-input v-model="query" clearable placeholder="搜索标题、URL、目录路径" style="max-width:420px"/>
+            <el-select v-model="folderId" filterable style="width:300px" placeholder="选择目录"><el-option label="全部目录" value=""/><el-option v-for="f in folders" :key="f.id" :value="f.id" :label="`${f.path ? f.path + ' / ' : ''}${f.title}`"/></el-select>
+          </div>
+          <el-alert v-if="store.error" :title="store.error" type="error" show-icon :closable="false"/>
+          <el-table :data="store.rows" v-loading="store.loading" stripe height="min(60vh,650px)" row-key="id">
+            <el-table-column label="标题" min-width="240"><template #default="{row}"><span class="kind">{{ row.kind === 'folder' ? '📁' : '🔖' }}</span>{{ row.title || '(无标题)' }}</template></el-table-column>
+            <el-table-column prop="path" label="目录路径" min-width="220" show-overflow-tooltip/>
+            <el-table-column label="URL" min-width="300" show-overflow-tooltip><template #default="{row}"><a v-if="row.url && /^https?:\/\//i.test(row.url)" :href="row.url" target="_blank" rel="noopener noreferrer">{{ row.url }}</a><span v-else>{{ row.url || '—' }}</span></template></el-table-column>
+            <el-table-column label="添加时间" width="175"><template #default="{row}">{{ row.dateAdded ? new Date(row.dateAdded).toLocaleString() : '—' }}</template></el-table-column>
+          </el-table>
+          <div class="footer"><span>共 {{ store.total }} 条（每页 200 条）</span><el-pagination v-model:current-page="page" :page-size="200" layout="prev, pager, next" :total="store.total"/></div>
+        </el-card>
+        <p class="notice">导入 JSON 备份是受控操作：仅在批准后才写入浏览器。删除操作会要求二次确认。所有写入由 OperationExecutor 统一执行并产生审计日志。</p>
+      </el-tab-pane>
+      <el-tab-pane label="链接健康" name="health">
+        <HealthView />
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 <style scoped>

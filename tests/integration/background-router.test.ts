@@ -30,6 +30,11 @@ const deps = () => ({
   executePlan: vi.fn().mockResolvedValue({ planId: 'p', status: 'completed', succeeded: 0, failed: 0, compensated: 0 }),
   listPlans: vi.fn().mockResolvedValue([]),
   getPlan: vi.fn().mockResolvedValue({ id: 'p', steps: [], status: 'draft' }),
+  // Phase 3
+  startHealth: vi.fn().mockResolvedValue({ total: 0, enqueued: 0, skipped: 0 }),
+  cancelHealth: vi.fn().mockResolvedValue({ status: 'cancelled' }),
+  healthStatus: vi.fn().mockResolvedValue({ status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0 }),
+  listHealth: vi.fn().mockResolvedValue({ rows: [], status: { status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0 } }),
 });
 
 /**
@@ -52,7 +57,11 @@ function wireLikeBackground(d: ReturnType<typeof deps>): BackgroundRouter {
     .register('PLAN_LIST', () => d.listPlans())
     .register('PLAN_GET', (req) => d.getPlan(req.planId))
     .register('APPROVE', (req) => d.approvePlan(req.planId, req.ttlMs))
-    .register('EXECUTE', (req) => d.executePlan(req.planId, req.approvalToken, req.dryRun));
+    .register('EXECUTE', (req) => d.executePlan(req.planId, req.approvalToken, req.dryRun))
+    .register('HEALTH_START', (req) => d.startHealth(req.bookmarkIds))
+    .register('HEALTH_CANCEL', () => d.cancelHealth())
+    .register('HEALTH_STATUS', () => d.healthStatus())
+    .register('HEALTH_LIST', () => d.listHealth());
 }
 
 describe('BackgroundRouter', () => {
@@ -144,6 +153,10 @@ describe('BackgroundRouter — background.ts wiring regression', () => {
       'PLAN_GET',
       'APPROVE',
       'EXECUTE',
+      'HEALTH_START',
+      'HEALTH_CANCEL',
+      'HEALTH_STATUS',
+      'HEALTH_LIST',
     ];
 
     for (const t of types) {

@@ -9,6 +9,7 @@ This project follows a 7-phase development plan.
 - **Phase 0 — Audit & Quality Baseline** ✅ passed ([report](./docs/audit-phase0.md))
 - **Phase 1 — Bookmark data + UI** ✅ passed ([report](./docs/phase-1-report.md), [data model](./docs/data-model.md))
 - **Phase 2 — Backup + safe write executor** ✅ passed ([report](./docs/phase-2-report.md), [security notes](./docs/security.md))
+- **Phase 3 — Link health** ✅ passed ([report](./docs/phase-3-report.md), [implementation notes](./docs/link-health.md))
 
 The contract that all subsequent agents follow is in [`docs/DEVELOPMENT_GUIDE.md`](./docs/DEVELOPMENT_GUIDE.md).
 

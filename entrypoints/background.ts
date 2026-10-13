@@ -25,6 +25,10 @@ import { SyncCoordinator, DebouncedSync } from '../src/domain/bookmarks/sync';
 import { matchesSearch } from '../src/domain/bookmarks/normalize';
 import { PlanService } from '../src/domain/operations/plan-service';
 import type { Approval } from '../src/domain/operations/types';
+import { HealthService } from '../src/domain/health/service';
+import { DEFAULT_HEALTH_CONFIG } from '../src/domain/health/types';
+import { createBrowserDnsResolver } from '../src/infrastructure/network/dns-resolver';
+import type { LinkCheckRecord } from '../src/domain/health/types';
 import {
   ok,
   type BackgroundRequest,
@@ -33,6 +37,8 @@ import {
   type ListResult,
   type StatsSummary,
   type SyncState,
+  type HealthStatusSummary,
+  type HealthRunSummary,
 } from '../src/infrastructure/messaging/contracts';
 
 type BookmarkTreeNode = chrome.bookmarks.BookmarkTreeNode;
@@ -165,6 +171,11 @@ export default defineBackground(() => {
       if (!plan) return null;
       return { ...plan, steps };
     },
+    // Phase 3: link health
+    startHealth: (bookmarkIds?: string[]) => healthService.start(bookmarkIds) as unknown as Promise<HealthRunSummary>,
+    cancelHealth: () => { healthService.cancel(); return Promise.resolve({ status: 'cancelled' }); },
+    healthStatus: () => healthService.snapshotStatus() as unknown as Promise<HealthStatusSummary>,
+    listHealth: () => healthService.snapshot() as unknown as Promise<unknown[]>,
   };
 
   // Wire every BackgroundRequest type to its handler. Without these
@@ -184,7 +195,11 @@ export default defineBackground(() => {
     .register('PLAN_LIST', () => deps.listPlans())
     .register('PLAN_GET', (req) => deps.getPlan(req.planId))
     .register('APPROVE', (req) => deps.approvePlan(req.planId, req.ttlMs))
-    .register('EXECUTE', (req) => deps.executePlan(req.planId, req.approvalToken, req.dryRun));
+    .register('EXECUTE', (req) => deps.executePlan(req.planId, req.approvalToken, req.dryRun))
+    .register('HEALTH_START', (req) => deps.startHealth(req.bookmarkIds))
+    .register('HEALTH_CANCEL', () => deps.cancelHealth())
+    .register('HEALTH_STATUS', () => deps.healthStatus())
+    .register('HEALTH_LIST', () => deps.listHealth());
 
   // ---- PlanService (Phase 2) --------------------------------------------
   // The only place in the codebase that wraps the bookmarks API for
@@ -240,6 +255,74 @@ export default defineBackground(() => {
     currentSyncGeneration: () => getCurrentGeneration(),
     newId,
     now: () => Date.now(),
+  });
+
+  // ---- HealthService (Phase 3) ------------------------------------------
+  // Link health scan facade. Reads bookmarks from Dexie, runs the
+  // FetchClient (with HEAD→GET fallback) per item via the
+  // TaskScheduler, persists results to the linkChecks store.
+  const dnsResolver = createBrowserDnsResolver();
+  // Pause flag — the service is constructed with a closure that
+  // reads this flag, avoiding the self-referential initializer.
+  let healthPaused = false;
+  const healthService: HealthService = new HealthService({
+    listBookmarks: async () => db.bookmarks.toArray(),
+    latestChecks: async () => db.linkChecks.toArray(),
+    saveCheck: async (rec: LinkCheckRecord) => { await db.linkChecks.put(rec); },
+    dns: dnsResolver,
+    fetch: async (req) => {
+      // Real browser fetch. AbortSignal is honored. Response body is
+      // capped at req.maxResponseBytes.
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), req.timeoutMs);
+      if (req.signal) req.signal.addEventListener('abort', () => ac.abort(), { once: true });
+      try {
+        const res = await fetch(req.url, {
+          method: req.method,
+          redirect: 'follow',
+          signal: ac.signal,
+          headers: { 'user-agent': req.userAgent },
+        });
+        const retryAfter = res.headers.get('retry-after');
+        let body: string | undefined;
+        if (req.method === 'GET' && res.body) {
+          const reader = res.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let received = 0;
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) {
+              received += value.byteLength;
+              if (received > req.maxResponseBytes) { reader.cancel(); break; }
+              chunks.push(value);
+            }
+          }
+          const decoder = new TextDecoder();
+          body = chunks.map((c) => decoder.decode(c, { stream: true })).join('');
+        }
+        return {
+          status: res.status,
+          url: res.url,
+          retryAfterSec: retryAfter ? Number(retryAfter) : null,
+          ...(body !== undefined ? { body } : {}),
+        };
+      } finally {
+        clearTimeout(t);
+      }
+    },
+    config: {
+      defaultTimeoutMs: DEFAULT_HEALTH_CONFIG.timeoutMs,
+      defaultMaxRedirects: DEFAULT_HEALTH_CONFIG.maxRedirects,
+      defaultMaxResponseBytes: DEFAULT_HEALTH_CONFIG.maxResponseBytes,
+      defaultUserAgent: DEFAULT_HEALTH_CONFIG.userAgent,
+      globalConcurrency: DEFAULT_HEALTH_CONFIG.globalConcurrency,
+      perHostConcurrency: DEFAULT_HEALTH_CONFIG.perHostConcurrency,
+      maxRetries: DEFAULT_HEALTH_CONFIG.maxRetries,
+    },
+    now: () => Date.now(),
+    newId,
+    isPaused: () => healthPaused,
   });
 
   // ---- Message handler --------------------------------------------------

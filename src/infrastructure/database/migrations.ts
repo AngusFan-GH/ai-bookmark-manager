@@ -13,6 +13,7 @@
 // Schema history
 //   v1 — bookmarks / folders / meta (Phase 1)
 //   v2 — + plans / operationSteps / snapshots / audit (Phase 2)
+//   v3 — + linkChecks (Phase 3)
 
 import Dexie, { type Table } from 'dexie';
 import type { BookmarkRecord, FolderRecord } from '../../domain/bookmarks/types';
@@ -23,6 +24,7 @@ import type {
   TreeSnapshot,
   OperationAuditEntry,
 } from '../../domain/operations/types';
+import type { LinkCheckRecord } from '../../domain/health/types';
 
 export interface SchemaV1Stores {
   bookmarks: string;
@@ -37,6 +39,10 @@ export interface SchemaV2Stores extends SchemaV1Stores {
   audit: string;
 }
 
+export interface SchemaV3Stores extends SchemaV2Stores {
+  linkChecks: string;
+}
+
 export const SCHEMA_V1: SchemaV1Stores = {
   bookmarks:
     'id, browserId, parentId, kind, title, url, [parentId+index], updatedAt, syncGeneration',
@@ -44,11 +50,6 @@ export const SCHEMA_V1: SchemaV1Stores = {
   meta: 'key, updatedAt',
 };
 
-/**
- * v2 adds the four Phase 2 stores. Indexes match dev guide § 4.1
- * ("plans: id, status, createdAt"; "operationSteps: id, planId, status, targetId";
- * "snapshots: id, planId, createdAt"; audit append-only).
- */
 export const SCHEMA_V2: SchemaV2Stores = {
   ...SCHEMA_V1,
   plans: 'id, status, createdAt, basedOnGeneration',
@@ -57,12 +58,17 @@ export const SCHEMA_V2: SchemaV2Stores = {
   audit: 'id, planId, stepId, recordedAt',
 };
 
+export const SCHEMA_V3: SchemaV3Stores = {
+  ...SCHEMA_V2,
+  linkChecks: 'id, bookmarkId, status, checkedAt, [bookmarkId+checkedAt], retryAt',
+};
+
 /**
  * Build a fresh Dexie database bound to a unique name at a given
  * schema version. Used by tests so each test scenario starts from a
  * clean slate without touching the real chrome-extension IndexedDB.
  */
-export function createTestDatabase(name: string, schemaVersion: 1 | 2 = 2): Dexie & {
+export function createTestDatabase(name: string, schemaVersion: 1 | 2 | 3 = 3): Dexie & {
   bookmarks: Table<BookmarkRecord, string>;
   folders: Table<FolderRecord, string>;
   meta: Table<MetaRecord, string>;
@@ -70,6 +76,7 @@ export function createTestDatabase(name: string, schemaVersion: 1 | 2 = 2): Dexi
   operationSteps?: Table<OperationStep, string>;
   snapshots?: Table<TreeSnapshot, string>;
   audit?: Table<OperationAuditEntry, string>;
+  linkChecks?: Table<LinkCheckRecord, string>;
 } {
   const d = new Dexie(name) as Dexie & {
     bookmarks: Table<BookmarkRecord, string>;
@@ -79,6 +86,7 @@ export function createTestDatabase(name: string, schemaVersion: 1 | 2 = 2): Dexi
     operationSteps?: Table<OperationStep, string>;
     snapshots?: Table<TreeSnapshot, string>;
     audit?: Table<OperationAuditEntry, string>;
+    linkChecks?: Table<LinkCheckRecord, string>;
   };
   d.version(1).stores({
     bookmarks: SCHEMA_V1.bookmarks,
@@ -96,11 +104,22 @@ export function createTestDatabase(name: string, schemaVersion: 1 | 2 = 2): Dexi
       audit: SCHEMA_V2.audit,
     });
   }
+  if (schemaVersion >= 3) {
+    d.version(3).stores({
+      bookmarks: SCHEMA_V3.bookmarks,
+      folders: SCHEMA_V3.folders,
+      meta: SCHEMA_V3.meta,
+      plans: SCHEMA_V3.plans,
+      operationSteps: SCHEMA_V3.operationSteps,
+      snapshots: SCHEMA_V3.snapshots,
+      audit: SCHEMA_V3.audit,
+      linkChecks: SCHEMA_V3.linkChecks,
+    });
+  }
   return d;
 }
 
 /**
- * Current schema version. Bumped when a new migration lands. New
- * stores go in SCHEMA_V2 → SCHEMA_V3 etc. in the same file.
+ * Current schema version. Bumped when a new migration lands.
  */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;

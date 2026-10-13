@@ -19,6 +19,8 @@ import {
   type StatsSummary,
   type ExportPayload,
   type SyncState,
+  type HealthRunSummary,
+  type HealthStatusSummary,
 } from './contracts';
 
 export interface RouterDeps {
@@ -35,6 +37,11 @@ export interface RouterDeps {
   executePlan(planId: string, token: string, dryRun?: boolean): Promise<{ planId: string; status: string; succeeded: number; failed: number; compensated: number }>;
   listPlans(): Promise<unknown[]>;
   getPlan(planId: string): Promise<unknown>; // returns plan + steps or null
+  // Phase 3: link health
+  startHealth(bookmarkIds?: string[]): Promise<HealthRunSummary>;
+  cancelHealth(): Promise<{ status: string }>;
+  healthStatus(): Promise<HealthStatusSummary>;
+  listHealth(): Promise<unknown[]>;
 }
 
 /**

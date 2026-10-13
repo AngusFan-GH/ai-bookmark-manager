@@ -5,7 +5,7 @@
 > (the canonical `bookmarks` + `folders` stores, the `meta.syncState`
 > row, and the `syncGeneration` per-row counter).
 
-## 1. Stores (Dexie schema v2)
+## 1. Stores (Dexie schema v3)
 
 | store      | primary key | indexes                                                                                              | contents              | phase |
 | ---------- | ----------- | ---------------------------------------------------------------------------------------------------- | --------------------- | ----- |

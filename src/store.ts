@@ -14,7 +14,10 @@ import type {
   OperationStep,
   ApprovalToken,
   ExecuteResultMsg,
+  HealthRunSummary,
+  HealthStatusSummary,
 } from './infrastructure/messaging/contracts';
+import type { LinkCheckRecord } from './domain/health/types';
 
 let nextRequestId = 1;
 const reqId = (): string => `r${Date.now().toString(36)}_${(nextRequestId++).toString(36)}`;
@@ -84,9 +87,25 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
     return request<OperationPlan & { steps: OperationStep[] }>({ type: 'PLAN_GET', requestId: reqId(), planId });
   }
 
+  // ---- Phase 3: link health -----------------------------------------------
+
+  async function startHealth(bookmarkIds?: string[]): Promise<HealthRunSummary> {
+    return request<HealthRunSummary>({ type: 'HEALTH_START', requestId: reqId(), bookmarkIds });
+  }
+  async function cancelHealth(): Promise<{ status: string }> {
+    return request<{ status: string }>({ type: 'HEALTH_CANCEL', requestId: reqId() });
+  }
+  async function healthStatus(): Promise<HealthStatusSummary> {
+    return request<HealthStatusSummary>({ type: 'HEALTH_STATUS', requestId: reqId() });
+  }
+  async function healthList(): Promise<{ rows: LinkCheckRecord[] }> {
+    return request<{ rows: LinkCheckRecord[] }>({ type: 'HEALTH_LIST', requestId: reqId() });
+  }
+
   return {
     rows, folders, stats, total, loading, error,
     load, sync,
     previewImport, draftPlan, approve, execute, getPlan,
+    startHealth, cancelHealth, healthStatus, healthList,
   };
 });
