@@ -86,10 +86,15 @@ onMounted(async () => {
         <el-button :loading="syncing" @click="sync">重新同步</el-button>
         <el-button @click="backup">导出 JSON 备份</el-button>
         <ImportFlow />
+        <!-- 链接健康 tab switcher: 始终可见；处于健康 tab 时高亮 (primary) -->
         <el-button
-          :type="activeTab === 'health' ? 'primary' : 'default'"
+          data-testid="link-health-button"
+          :type="activeTab === 'health' ? 'primary' : 'warning'"
+          round
           @click="activeTab = 'health'"
-        >链接健康</el-button>
+        >
+          <span style="margin-right: 4px">🩺</span>链接健康
+        </el-button>
       </div>
     </header>
     <div class="stats">
