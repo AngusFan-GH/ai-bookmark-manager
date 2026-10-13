@@ -95,6 +95,13 @@ export interface HealthConfig {
   perHostConcurrency: number;    // default 1
   normalRecheckDays: number;     // default 30
   fastRecheckDays: number;       // default 2
+  /**
+   * If true, the URL guard will NOT block RFC 1918 / loopback / local
+   * hosts. **Off by default** because dev guide § 0.1 forbids SSRF
+   * probing of internal infrastructure. The user can opt in if they
+   * really want to monitor their home NAS, dev server, etc.
+   */
+  allowPrivateHosts: boolean;     // default false
 }
 
 export const DEFAULT_HEALTH_CONFIG: HealthConfig = {
@@ -108,4 +115,8 @@ export const DEFAULT_HEALTH_CONFIG: HealthConfig = {
   perHostConcurrency: 1,
   normalRecheckDays: 30,
   fastRecheckDays: 2,
+  // dev guide § 0.1 red line: do not probe internal / private hosts
+  // without explicit user opt-in. The Settings page exposes a toggle
+  // that flips this to true; see HealthView's "settings" card.
+  allowPrivateHosts: false,
 };

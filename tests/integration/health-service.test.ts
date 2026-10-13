@@ -45,6 +45,7 @@ function makeDeps(overrides: Partial<HealthDeps> = {}): HealthDeps {
     config: {
       defaultTimeoutMs: 1000, defaultMaxRedirects: 5, defaultMaxResponseBytes: 1000,
       defaultUserAgent: 'test', globalConcurrency: 2, perHostConcurrency: 1, maxRetries: 0,
+      allowPrivateHosts: false,
     },
     now: () => Date.now(),
     newId,

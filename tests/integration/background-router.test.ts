@@ -35,6 +35,9 @@ const deps = () => ({
   cancelHealth: vi.fn().mockResolvedValue({ status: 'cancelled' }),
   healthStatus: vi.fn().mockResolvedValue({ status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0 }),
   listHealth: vi.fn().mockResolvedValue({ rows: [], status: { status: 'idle', queued: 0, inflight: 0, total: 0, processed: 0 } }),
+  // Phase 3.5
+  getSetting: vi.fn().mockResolvedValue(false),
+  setSetting: vi.fn().mockResolvedValue(undefined),
 });
 
 /**
@@ -61,7 +64,9 @@ function wireLikeBackground(d: ReturnType<typeof deps>): BackgroundRouter {
     .register('HEALTH_START', (req) => d.startHealth(req.bookmarkIds))
     .register('HEALTH_CANCEL', () => d.cancelHealth())
     .register('HEALTH_STATUS', () => d.healthStatus())
-    .register('HEALTH_LIST', () => d.listHealth());
+    .register('HEALTH_LIST', () => d.listHealth())
+    .register('SETTINGS_GET', (req) => d.getSetting(req.key))
+    .register('SETTINGS_SET', (req) => d.setSetting(req.key, req.value));
 }
 
 describe('BackgroundRouter', () => {
@@ -157,6 +162,8 @@ describe('BackgroundRouter — background.ts wiring regression', () => {
       'HEALTH_CANCEL',
       'HEALTH_STATUS',
       'HEALTH_LIST',
+      'SETTINGS_GET',
+      'SETTINGS_SET',
     ];
 
     for (const t of types) {

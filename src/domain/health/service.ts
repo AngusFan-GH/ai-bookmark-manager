@@ -37,7 +37,7 @@ export interface HealthServiceDeps {
   /** HTTP fetcher matching the FetchLikeFn contract. */
   fetch: FetchLikeFn;
   /** Config knobs. */
-  config: { defaultTimeoutMs: number; defaultMaxRedirects: number; defaultMaxResponseBytes: number; defaultUserAgent: string; globalConcurrency: number; perHostConcurrency: number; maxRetries: number };
+  config: { defaultTimeoutMs: number; defaultMaxRedirects: number; defaultMaxResponseBytes: number; defaultUserAgent: string; globalConcurrency: number; perHostConcurrency: number; maxRetries: number; allowPrivateHosts: boolean };
   /** Wall-clock. */
   now(): number;
   /** Fresh id (uuid v4). */
@@ -96,9 +96,10 @@ export class HealthService {
       : all.filter((b) => b.url);
     const items: SchedulerInputItem[] = [];
     let skipped = 0;
+    const allowPrivate = this.deps.config.allowPrivateHosts === true;
     for (const b of filtered) {
       const url = b.url!;
-      const guard = guardUrl(url);
+      const guard = guardUrl(url, { allowPrivateHosts: allowPrivate });
       if (!guard.ok) {
         // Persist a single 'unsupported' record so the UI shows why.
         await this.deps.saveCheck({
@@ -106,14 +107,14 @@ export class HealthService {
           bookmarkId: b.id,
           status: 'unsupported',
           checkedAt: this.deps.now(),
-          evidence: [guard.reason],
+          evidence: [guard.reason, ...(allowPrivate ? [] : ['toggle on to scan private hosts'])],
           syncGeneration: (b as { syncGeneration?: number }).syncGeneration,
         });
         skipped += 1;
         continue;
       }
       // DNS guard before scheduling; if it fails we mark 'unsupported'.
-      const dnsCheck = await guardResolvedHost(new URL(url).hostname, this.deps.dns);
+      const dnsCheck = await guardResolvedHost(new URL(url).hostname, this.deps.dns, { allowPrivateHosts: allowPrivate });
       if (!dnsCheck.ok) {
         await this.deps.saveCheck({
           id: this.deps.newId(),
@@ -198,6 +199,7 @@ export class HealthService {
         });
         const evidence: string[] = [];
         if (outcome.networkError) evidence.push(`network: ${outcome.networkError}`);
+        if (outcome.rawError) evidence.push(`raw: ${outcome.rawError}`);
         if (outcome.httpCode > 0) evidence.push(`${outcome.httpCode}`);
         if (outcome.finalUrl && outcome.finalUrl !== url) evidence.push(`→ ${outcome.finalUrl}`);
         return {

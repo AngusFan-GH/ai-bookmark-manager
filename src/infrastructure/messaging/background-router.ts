@@ -42,6 +42,9 @@ export interface RouterDeps {
   cancelHealth(): Promise<{ status: string }>;
   healthStatus(): Promise<HealthStatusSummary>;
   listHealth(): Promise<unknown[]>;
+  // Phase 3.5: settings (read / write the allowPrivateHosts flag)
+  getSetting(key: 'allowPrivateHosts'): Promise<boolean>;
+  setSetting(key: 'allowPrivateHosts', value: boolean): Promise<void>;
 }
 
 /**

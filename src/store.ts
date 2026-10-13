@@ -102,10 +102,20 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
     return request<{ rows: LinkCheckRecord[] }>({ type: 'HEALTH_LIST', requestId: reqId() });
   }
 
+  // ---- Phase 3.5: settings ----------------------------------------------
+
+  async function getSetting(key: 'allowPrivateHosts'): Promise<boolean> {
+    return request<boolean>({ type: 'SETTINGS_GET', requestId: reqId(), key });
+  }
+  async function setSetting(key: 'allowPrivateHosts', value: boolean): Promise<void> {
+    return request<void>({ type: 'SETTINGS_SET', requestId: reqId(), key, value });
+  }
+
   return {
     rows, folders, stats, total, loading, error,
     load, sync,
     previewImport, draftPlan, approve, execute, getPlan,
     startHealth, cancelHealth, healthStatus, healthList,
+    getSetting, setSetting,
   };
 });

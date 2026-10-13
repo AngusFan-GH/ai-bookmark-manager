@@ -48,6 +48,12 @@ export interface FetchAttemptOutcome {
   redirectCount: number;
   /** Network-layer error stage, or null. */
   networkError: FetchNetworkErrorStage | null;
+  /**
+   * Raw error code / name from the underlying fetch. Useful for
+   * debugging "network: unknown" — the UI surfaces it as the
+   * `raw:` evidence token. Empty when no error.
+   */
+  rawError: string;
   /** The response body, if a GET was performed. */
   body?: string;
   /** Retry-After (seconds) from the final response. */
@@ -91,6 +97,7 @@ export async function fetchOnce(
       finalUrl: url,
       redirectCount: 0,
       networkError: 'dns',
+      rawError: dnsCheck.reason,
       retryAfterSec: null,
     };
   }
@@ -109,6 +116,7 @@ export async function fetchOnce(
       finalUrl: resp.url,
       redirectCount: 0, // the real fetch impl is responsible for following redirects
       networkError: null,
+      rawError: '',
       body: resp.body,
       retryAfterSec: resp.retryAfterSec,
     };
@@ -119,6 +127,7 @@ export async function fetchOnce(
       finalUrl: url,
       redirectCount: 0,
       networkError: stage,
+      rawError: extractRawError(err),
       retryAfterSec: null,
     };
   } finally {
@@ -126,14 +135,74 @@ export async function fetchOnce(
   }
 }
 
+/**
+ * Pull the most useful diagnostic out of a thrown fetch error so
+ * the UI evidence list can show something actionable. We prefer
+ * `err.name` (e.g. 'TypeError') and fall back to the message.
+ */
+function extractRawError(err: unknown): string {
+  if (!err) return '';
+  if (err instanceof Error) {
+    const name = err.name || 'Error';
+    const msg = err.message || '';
+    // Trim and clamp — the UI evidence list is space-constrained.
+    const clean = msg.replace(/\s+/g, ' ').slice(0, 120);
+    return clean ? `${name}: ${clean}` : name;
+  }
+  return String(err).slice(0, 120);
+}
+
+/**
+ * Map a thrown fetch error to a coarse network stage. The goal is
+ * the UI evidence string — accurate diagnosis helps the user
+ * understand why their Chinese-domains returned network: unknown
+ * (typical: macOS system proxy / VPN / DNS pollution).
+ *
+ * Order matters: abort > dns > tls > tcp > unknown.
+ */
 function mapErrorStage(err: unknown): FetchNetworkErrorStage {
   if (!err) return 'unknown';
   const name = (err as { name?: string } | null)?.name ?? '';
   if (name === 'AbortError') return 'abort';
   const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
-  if (msg.includes('dns') || msg.includes('getaddrinfo') || msg.includes('enotfound')) return 'dns';
-  if (msg.includes('tls') || msg.includes('ssl') || msg.includes('cert')) return 'tls';
-  if (msg.includes('tcp') || msg.includes('econnrefused') || msg.includes('econnreset')) return 'tcp';
+
+  // abort from our own timeout (we never see this from the global
+  // fetch in MV3 service workers, but be defensive).
+  if (msg.includes('aborted') || msg.includes('aborted due to')) return 'abort';
+
+  // DNS resolution failures.
+  if (msg.includes('getaddrinfo') || msg.includes('enotfound')
+      || msg.includes('dns') || msg.includes('name not known')
+      || msg.includes('no such host')) return 'dns';
+
+  // TLS / certificate / SNI / protocol issues.
+  if (msg.includes('tls') || msg.includes('ssl') || msg.includes('cert')
+      || msg.includes('handshake') || msg.includes('unable to verify')
+      || msg.includes('hostname mismatch') || msg.includes('protocol')) return 'tls';
+
+  // TCP / connect-level failures.
+  if (msg.includes('econnrefused') || msg.includes('econnreset')
+      || msg.includes('etimedout') || msg.includes('enetunreach')
+      || msg.includes('ehostunreach') || msg.includes('epipe')
+      || msg.includes('connection refused') || msg.includes('connection reset')
+      || msg.includes('connection timed out') || msg.includes('connect timeout')
+      || msg.includes('network is unreachable') || msg.includes('network timeout')) return 'tcp';
+
+  // macOS / Linux specific: the URL is for an IPv6 host that has no
+  // IPv4 route, or the local stack refused to connect.
+  if (msg.includes('no route to host') || msg.includes('network down')) return 'tcp';
+
+  // CORS / mixed content — the fetch itself succeeded, but we
+  // couldn't read the response. We surface these as 'tcp' because
+  // from the extension's perspective the request is unreachable.
+  if (msg.includes('cors') || msg.includes('failed to fetch')
+      || msg.includes('cross-origin') || msg.includes('opaque')
+      || msg.includes('networkerror') || msg.includes('load failed')
+      || msg.includes('failed to load')) return 'tcp';
+
+  // Truly unrecognised. We attach the raw error code / name to the
+  // evidence array so the UI can show a hint about what to look for
+  // (system proxy, VPN, DNS pollution, etc.).
   return 'unknown';
 }
 

@@ -208,3 +208,31 @@ describe('fetchOnce — timeout', () => {
     expect(out.networkError).not.toBeNull();
   });
 });
+
+describe('fetchOnce — error stage mapping', () => {
+  it('maps known fetch errors to specific network stages', async () => {
+    // Build a fake adapter that rejects with various error messages
+    // and verify the stage is classified correctly.
+    const makeDeps = (err: Error) => ({
+      fetch: async () => { throw err; },
+      defaultMaxRedirects: 5, defaultTimeoutMs: 1000, defaultMaxResponseBytes: 1000,
+      defaultUserAgent: 'test',
+    });
+    const cases: Array<[string, Error, 'dns' | 'tcp' | 'tls' | 'abort' | 'unknown']> = [
+      ['TypeError: Failed to fetch',                     new TypeError('Failed to fetch'),                              'tcp'],
+      ['NetworkError when fetching resource',            new TypeError('NetworkError when fetching resource'),         'tcp'],
+      ['getaddrinfo ENOTFOUND',                          new Error('getaddrinfo ENOTFOUND example.com'),             'dns'],
+      ['no such host is known',                          new Error('no such host is known'),                         'dns'],
+      ['TLS handshake failed',                          new Error('TLS handshake failed'),                         'tls'],
+      ['unable to verify the first certificate',         new Error('unable to verify the first certificate'),        'tls'],
+      ['connect ECONNREFUSED 127.0.0.1:443',             new Error('connect ECONNREFUSED 127.0.0.1:443'),            'tcp'],
+      ['Connect Timeout Error',                          new Error('Connect Timeout Error'),                         'tcp'],
+      ['aborted',                                        Object.assign(new Error('aborted'), { name: 'AbortError' }), 'abort'],
+    ];
+    for (const [label, err, expected] of cases) {
+      const out = await fetchOnce('https://x.test', 'GET', makeDeps(err));
+      expect(out.networkError, label).toBe(expected);
+      expect(out.rawError, label).toContain(err.name || err.constructor.name);
+    }
+  });
+});

@@ -29,6 +29,21 @@ const rows = ref<HealthRow[]>([]);
 const filter = ref<'all' | LinkStatus>('all');
 const _selectedIds = ref<string[]>([]); // reserved for Phase 4 bulk-recheck
 
+// Phase 3.5: per-extension setting. Defaults to false (dev guide
+// § 0.1 SSRF defense). Toggling it on causes a re-scan to pick up
+// localhost / 192.168.x.x / .local / .lan hosts.
+const allowPrivate = ref(false);
+async function loadSetting() {
+  try { allowPrivate.value = await store.getSetting('allowPrivateHosts'); } catch { /* ignore */ }
+}
+async function onAllowPrivateChange(v: boolean) {
+  allowPrivate.value = v;
+  try {
+    await store.setSetting('allowPrivateHosts', v);
+    ElMessage.success(v ? '已开启内网扫描（注意 SSRF 风险）' : '已关闭内网扫描');
+  } catch (e) { ElMessage.error(String(e)); }
+}
+
 const statusLabels: Record<LinkStatus, string> = {
   unchecked: '未检测',
   checking: '检测中',
@@ -105,7 +120,7 @@ async function cancelScan() {
   } catch (e) { ElMessage.error(String(e)); }
 }
 
-onMounted(refresh);
+onMounted(() => { void loadSetting(); void refresh(); });
 </script>
 
 <template>
@@ -130,6 +145,28 @@ onMounted(refresh);
       </el-tag>
       <span class="muted small">已处理 {{ status.processed }} / {{ status.total }} · 队列 {{ status.queued }} · 进行中 {{ status.inflight }}</span>
     </div>
+
+    <!-- Phase 3.5: settings card. Off by default; enabling lets the
+         user opt in to scanning localhost / 192.168.x.x / .local. The
+         dev guide § 0.1 warns this is a SSRF surface; we surface that
+         warning text in the help line. -->
+    <el-card shadow="never" class="settings-card">
+      <div class="settings-row">
+        <div>
+          <div class="settings-title">允许扫描内网地址</div>
+          <div class="muted small">开启后会尝试 localhost、192.168.x.x、.local、.lan 等内网主机。<br>
+            关闭状态下这些 URL 会被标为「不支持」并跳过。<br>
+            <b>注意</b>：开启此选项意味着扩展会向你的内网发送请求（SSRF 风险）。</div>
+        </div>
+        <el-switch
+          :model-value="allowPrivate"
+          @update:model-value="onAllowPrivateChange"
+          inline-prompt
+          active-text="开"
+          inactive-text="关"
+        />
+      </div>
+    </el-card>
 
     <div class="filters">
       <el-radio-group v-model="filter" size="small">
@@ -180,6 +217,9 @@ onMounted(refresh);
 .health-head p { margin: 0; max-width: 600px; }
 .actions { display: flex; gap: 8px; }
 .status-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.settings-card { margin-bottom: 14px; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-title { font-weight: 500; margin-bottom: 4px; }
 .filters { margin-bottom: 14px; }
 .notice { margin-top: 12px; }
 </style>

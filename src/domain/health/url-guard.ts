@@ -53,11 +53,24 @@ export type UrlGuardVerdict =
   | { ok: false; reason: string; code: 'INVALID' | 'UNSUPPORTED_SCHEME' | 'PRIVATE_HOST' | 'NO_HOST' | 'CREDENTIALS' };
 
 /**
+ * Options that modify the static guard's strictness. Default is
+ * "deny private hosts" (dev guide § 0.1). Callers that really
+ * want to probe their home network can pass `allowPrivateHosts: true`.
+ */
+export interface GuardOptions {
+  allowPrivateHosts?: boolean;
+}
+
+/**
  * Static check: does the URL parse, use http/https, not embed
  * credentials, and not point to a literal private IP or known
  * loopback host?
+ *
+ * Pass `{ allowPrivateHosts: true }` to permit RFC 1918 / loopback
+ * hosts. The dev guide still warns (§ 0.1) that this is a SSRF
+ * surface; the UI must surface that warning when the toggle is on.
  */
-export function guardUrl(raw: string): UrlGuardVerdict {
+export function guardUrl(raw: string, options: GuardOptions = {}): UrlGuardVerdict {
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -74,29 +87,35 @@ export function guardUrl(raw: string): UrlGuardVerdict {
   if (!host) {
     return { ok: false, reason: 'URL has no host', code: 'NO_HOST' };
   }
+  // Dev guide § 0.1: do NOT probe internal infrastructure without
+  // explicit opt-in. When `allowPrivateHosts` is true, the private-IP
+  // and loopback checks below are skipped.
+  const allowPrivate = options.allowPrivateHosts === true;
   const lower = host.toLowerCase().replace(/[\[\]]/g, '');
-  if (BLOCKED_HOSTS.has(lower)) {
-    return { ok: false, reason: `blocked host: ${lower}`, code: 'PRIVATE_HOST' };
-  }
-  if (lower.endsWith('.local') || lower.endsWith('.internal') || lower.endsWith('.lan')) {
-    return { ok: false, reason: `local-suffix host: ${lower}`, code: 'PRIVATE_HOST' };
-  }
-  // Literal IPv4
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(lower)) {
-    const ip = ipv4ToInt(lower);
-    if (ip === null) {
-      return { ok: false, reason: `malformed IPv4: ${lower}`, code: 'PRIVATE_HOST' };
+  if (!allowPrivate) {
+    if (BLOCKED_HOSTS.has(lower)) {
+      return { ok: false, reason: `blocked host: ${lower}`, code: 'PRIVATE_HOST' };
     }
-    const hit = IPV4_PRIVATE_PATTERNS.find((p) => p.test(ip));
-    if (hit) {
-      return { ok: false, reason: `literal private IP (${hit.label})`, code: 'PRIVATE_HOST' };
+    if (lower.endsWith('.local') || lower.endsWith('.internal') || lower.endsWith('.lan')) {
+      return { ok: false, reason: `local-suffix host: ${lower}`, code: 'PRIVATE_HOST' };
     }
-  }
-  // Literal IPv6 (we conservatively reject any bracketed/hex form to
-  // avoid the IETF-special registry rabbit hole; users can opt in
-  // later via config).
-  if (lower.includes(':') || lower.includes('[') || /^[0-9a-f]+$/i.test(lower)) {
-    return { ok: false, reason: `literal IPv6 / non-DNS host: ${lower}`, code: 'PRIVATE_HOST' };
+    // Literal IPv4
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(lower)) {
+      const ip = ipv4ToInt(lower);
+      if (ip === null) {
+        return { ok: false, reason: `malformed IPv4: ${lower}`, code: 'PRIVATE_HOST' };
+      }
+      const hit = IPV4_PRIVATE_PATTERNS.find((p) => p.test(ip));
+      if (hit) {
+        return { ok: false, reason: `literal private IP (${hit.label})`, code: 'PRIVATE_HOST' };
+      }
+    }
+    // Literal IPv6 (we conservatively reject any bracketed/hex form to
+    // avoid the IETF-special registry rabbit hole; users can opt in
+    // later via config).
+    if (lower.includes(':') || lower.includes('[') || /^[0-9a-f]+$/i.test(lower)) {
+      return { ok: false, reason: `literal IPv6 / non-DNS host: ${lower}`, code: 'PRIVATE_HOST' };
+    }
   }
   return { ok: true, parsed };
 }
@@ -115,7 +134,12 @@ export interface DnsResolver {
   lookup(host: string): Promise<string[]>;
 }
 
-export async function guardResolvedHost(host: string, resolver: DnsResolver): Promise<{ ok: true } | { ok: false; reason: string; addresses: string[] }> {
+export async function guardResolvedHost(host: string, resolver: DnsResolver, options: { allowPrivateHosts?: boolean } = {}): Promise<{ ok: true } | { ok: false; reason: string; addresses: string[] }> {
+  if (options.allowPrivateHosts === true) {
+    // The user has explicitly opted in to scanning internal hosts.
+    // Skip the DNS-side private check entirely.
+    return { ok: true };
+  }
   let addrs: string[];
   try {
     addrs = await resolver.lookup(host);

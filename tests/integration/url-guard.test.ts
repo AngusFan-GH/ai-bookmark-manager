@@ -60,6 +60,18 @@ describe('guardUrl — static checks', () => {
     }
   });
 
+  it('accepts literal private IPv4 when allowPrivateHosts is true', () => {
+    for (const ip of ['10.0.0.1', '192.168.1.1', '127.0.0.1']) {
+      const v = guardUrl(`http://${ip}/`, { allowPrivateHosts: true });
+      expect(v.ok, ip).toBe(true);
+    }
+  });
+
+  it('accepts localhost when allowPrivateHosts is true', () => {
+    expect(guardUrl('http://localhost/', { allowPrivateHosts: true }).ok).toBe(true);
+    expect(guardUrl('http://localhost.localdomain/', { allowPrivateHosts: true }).ok).toBe(true);
+  });
+
   it('rejects reserved IPv4 ranges (TEST-NET, multicast, etc.)', () => {
     for (const ip of ['192.0.2.1', '198.51.100.1', '203.0.113.1', '224.0.0.1', '100.64.0.1']) {
       const v = guardUrl(`http://${ip}/`);

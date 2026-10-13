@@ -163,6 +163,22 @@ export type HealthCancelRequest = { type: 'HEALTH_CANCEL'; requestId: string };
 export type HealthStatusRequest = { type: 'HEALTH_STATUS'; requestId: string };
 export type HealthListRequest = { type: 'HEALTH_LIST'; requestId: string };
 
+/**
+ * Phase 3.5: per-extension setting that allows the URL guard to
+ * permit private / loopback hosts. Persisted in chrome.storage.
+ */
+export type SettingsSetRequest = {
+  type: 'SETTINGS_SET';
+  requestId: string;
+  key: 'allowPrivateHosts';
+  value: boolean;
+};
+export type SettingsGetRequest = {
+  type: 'SETTINGS_GET';
+  requestId: string;
+  key: 'allowPrivateHosts';
+};
+
 export interface HealthStatusSummary {
   status: 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
   queued: number;
@@ -187,7 +203,9 @@ export type BackgroundRequest =
   | HealthStartRequest
   | HealthCancelRequest
   | HealthStatusRequest
-  | HealthListRequest;
+  | HealthListRequest
+  | SettingsSetRequest
+  | SettingsGetRequest;
 
 // ---- Responses ------------------------------------------------------------
 

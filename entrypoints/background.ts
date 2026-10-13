@@ -44,6 +44,24 @@ import {
 type BookmarkTreeNode = chrome.bookmarks.BookmarkTreeNode;
 
 /**
+ * Read the `allowPrivateHosts` flag from chrome.storage.local.
+ * Defaults to false (dev guide § 0.1). Cached at module-init time
+ * because the service worker is short-lived and re-reads the flag
+ * at every health start.
+ */
+let ALLOW_PRIVATE_HOSTS = false;
+try {
+  chrome.storage?.local?.get(['allowPrivateHosts'], (data) => {
+    ALLOW_PRIVATE_HOSTS = data?.allowPrivateHosts === true;
+  });
+} catch { /* storage may be unavailable in tests; default is false */ }
+function readAllowPrivateHostsFlag(): boolean { return ALLOW_PRIVATE_HOSTS; }
+function writeAllowPrivateHostsFlag(v: boolean): void {
+  ALLOW_PRIVATE_HOSTS = v;
+  try { chrome.storage?.local?.set({ allowPrivateHosts: v }); } catch { /* ignore */ }
+}
+
+/**
  * Walk a chrome.bookmarks tree and return the node with the given id
  * (or null). Used by the PlanService to look up a target before
  * passing it to the bookmarks API.
@@ -176,6 +194,11 @@ export default defineBackground(() => {
     cancelHealth: () => { healthService.cancel(); return Promise.resolve({ status: 'cancelled' }); },
     healthStatus: () => healthService.snapshotStatus() as unknown as Promise<HealthStatusSummary>,
     listHealth: () => healthService.snapshot() as unknown as Promise<unknown[]>,
+    getSetting: (_key: 'allowPrivateHosts') => Promise.resolve(readAllowPrivateHostsFlag()),
+    setSetting: (_key: 'allowPrivateHosts', value: boolean) => {
+      writeAllowPrivateHostsFlag(value);
+      return Promise.resolve();
+    },
   };
 
   // Wire every BackgroundRequest type to its handler. Without these
@@ -199,7 +222,9 @@ export default defineBackground(() => {
     .register('HEALTH_START', (req) => deps.startHealth(req.bookmarkIds))
     .register('HEALTH_CANCEL', () => deps.cancelHealth())
     .register('HEALTH_STATUS', () => deps.healthStatus())
-    .register('HEALTH_LIST', () => deps.listHealth());
+    .register('HEALTH_LIST', () => deps.listHealth())
+    .register('SETTINGS_GET', (req) => deps.getSetting(req.key))
+    .register('SETTINGS_SET', (req) => deps.setSetting(req.key, req.value));
 
   // ---- PlanService (Phase 2) --------------------------------------------
   // The only place in the codebase that wraps the bookmarks API for
@@ -319,6 +344,11 @@ export default defineBackground(() => {
       globalConcurrency: DEFAULT_HEALTH_CONFIG.globalConcurrency,
       perHostConcurrency: DEFAULT_HEALTH_CONFIG.perHostConcurrency,
       maxRetries: DEFAULT_HEALTH_CONFIG.maxRetries,
+      // Phase 3.5: the user can opt in to scanning private hosts via
+      // the HealthView's settings card. Persisted in Dexie meta.
+      // For now we read it from a localStorage flag because Phase 4+
+      // is going to replace this with a proper settings store.
+      allowPrivateHosts: readAllowPrivateHostsFlag(),
     },
     now: () => Date.now(),
     newId,
