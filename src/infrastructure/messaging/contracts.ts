@@ -6,6 +6,11 @@
 // chrome.bookmarks APIs directly.
 
 import type { AppError } from '../../shared/errors';
+import type { OperationPlan, OperationStep } from '../../domain/operations/types';
+
+// Re-export for UI convenience: the store imports these from
+// `infrastructure/messaging/contracts` to keep a single import surface.
+export type { OperationPlan, OperationStep };
 
 export type SyncStatus = 'idle' | 'running' | 'succeeded' | 'failed';
 
@@ -96,6 +101,7 @@ export type PlanDraftRequest = {
   requestId: string;
   rawJson: string;
   mode: 'additive' | 'additive-with-meta' | 'controlled-merge';
+  title?: string;
 };
 
 export interface PlanSummary {

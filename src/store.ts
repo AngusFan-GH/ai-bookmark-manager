@@ -7,7 +7,14 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { request } from './client';
 import type { BookmarkRecord, FolderRecord } from './domain/bookmarks/types';
-import type { StatsSummary } from './infrastructure/messaging/contracts';
+import type {
+  StatsSummary,
+  ImportPreview,
+  OperationPlan,
+  OperationStep,
+  ApprovalToken,
+  ExecuteResultMsg,
+} from './infrastructure/messaging/contracts';
 
 let nextRequestId = 1;
 const reqId = (): string => `r${Date.now().toString(36)}_${(nextRequestId++).toString(36)}`;
@@ -55,5 +62,31 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
     await load();
   }
 
-  return { rows, folders, stats, total, loading, error, load, sync };
+  // ---- Phase 2: backup import + plan + execute -------------------------
+
+  async function previewImport(rawJson: string, mode: 'additive' | 'additive-with-meta' | 'controlled-merge'): Promise<ImportPreview> {
+    return request<ImportPreview>({ type: 'IMPORT_PREVIEW', requestId: reqId(), rawJson, mode });
+  }
+
+  async function draftPlan(rawJson: string, mode: 'additive' | 'additive-with-meta' | 'controlled-merge', title?: string): Promise<OperationPlan> {
+    return request<OperationPlan>({ type: 'PLAN_DRAFT', requestId: reqId(), rawJson, mode, title });
+  }
+
+  async function approve(planId: string, ttlMs?: number): Promise<ApprovalToken> {
+    return request<ApprovalToken>({ type: 'APPROVE', requestId: reqId(), planId, ttlMs });
+  }
+
+  async function execute(planId: string, approvalToken: string, dryRun?: boolean): Promise<ExecuteResultMsg> {
+    return request<ExecuteResultMsg>({ type: 'EXECUTE', requestId: reqId(), planId, approvalToken, dryRun });
+  }
+
+  async function getPlan(planId: string): Promise<OperationPlan & { steps: OperationStep[] }> {
+    return request<OperationPlan & { steps: OperationStep[] }>({ type: 'PLAN_GET', requestId: reqId(), planId });
+  }
+
+  return {
+    rows, folders, stats, total, loading, error,
+    load, sync,
+    previewImport, draftPlan, approve, execute, getPlan,
+  };
 });

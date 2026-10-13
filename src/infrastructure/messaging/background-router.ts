@@ -34,7 +34,7 @@ export interface RouterDeps {
   approvePlan(planId: string, ttlMs?: number): Promise<{ token: string; planId: string; expiresAt: number }>;
   executePlan(planId: string, token: string, dryRun?: boolean): Promise<{ planId: string; status: string; succeeded: number; failed: number; compensated: number }>;
   listPlans(): Promise<unknown[]>;
-  getPlan(planId: string): Promise<unknown>;
+  getPlan(planId: string): Promise<unknown>; // returns plan + steps or null
 }
 
 /**

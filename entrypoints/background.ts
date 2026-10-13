@@ -157,7 +157,14 @@ export default defineBackground(() => {
       return r as { planId: string; status: string; succeeded: number; failed: number; compensated: number };
     },
     listPlans: () => planService.listPlans() as unknown as Promise<unknown[]>,
-    getPlan: (id: string) => planService.getPlan(id) as unknown as Promise<unknown>,
+    getPlan: async (planId: string) => {
+      const [plan, steps] = await Promise.all([
+        planService.getPlan(planId),
+        planService.getPlanSteps(planId),
+      ]);
+      if (!plan) return null;
+      return { ...plan, steps };
+    },
   };
 
   // Wire every BackgroundRequest type to its handler. Without these

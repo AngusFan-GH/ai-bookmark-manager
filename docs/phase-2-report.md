@@ -14,7 +14,7 @@
 - [x] 2.7 差异预览算法（id-based matching）
 - [x] 2.8 一次性批准令牌（单次使用 + 5 分钟 TTL + 计划绑定）
 - [x] 2.9 测试：恶意 JSON、并发、后台中断、撤销、幂等
-- [x] 2.10 UI 集成：6 个新 BackgroundRequest 类型 + PlanService 串接
+- [x] 2.10 UI 集成：6 个新 BackgroundRequest 类型 + PlanService 串接 + 导入向导 UI
 - [x] 2.11 更新 `docs/security.md`
 - [x] 2.12 真实执行所有门禁 + 提交 + 推送
 
@@ -130,23 +130,58 @@ Test Files  11 passed (11)
 |---|---|---|
 | dev server 启动 | ✅ | `.output/chrome-mv3-dev/background.js` 已重新生成，含 12 个 `register()` |
 | Phase 1 功能未破坏 | 🟡 | 需在真实 Chrome 中 reload 扩展后确认 |
-| Phase 2 UI（导入/预览/批准/执行） | ❌ | 任务 2.10 只完成了 background + 协议，未做 Options UI 的按钮和对话框 |
+| Phase 2 UI（导入/预览/批准/执行） | ✅ | 见下节 |
 
 ## 5. 已知风险与未完成项
 
 ### 风险（不影响 MVP 验收）
-- **Options UI 没做导入按钮 / 预览对话框 / 计划确认弹窗**。2.10 完成了
-  后端协议（6 个新 BackgroundRequest + PlanService 串接），但没做 UI
-  集成。Phase 2 验收侧重**写后端安全**，UI 推迟到阶段 3+。
 - **未做真实 Chrome 端 10,000 条 + 重启对账测试**。仍是模拟。
 - **element-plus chunk 警告**未优化（ISS-6，阶段 4+）。
 - **ADR-001~003 仍未写**（跨阶段工程化任务）。
 - **CI 仍未建**。
+- **撤销 UI**（rollbackPlan 消息类型）未实现，但快照已捕获；
+  推迟到阶段 3+。
+- **per-step 高风险双重确认**当前是 UI 层的 ElMessageBox
+  confirm；executor 不做服务端二次确认。
+
+## 4b. Phase 2 UI（追加）
+
+`entrypoints/options/components/ImportFlow.vue` 实现了完整
+3 步向导：
+
+1. **预览（preview）**
+   - 选文件 → `IMPORT_PREVIEW`
+   - 三种模式单选：仅添加 / 添加 + 本地元数据 / 受控合并
+   - 显示 5 项指标（adds / updates / moves / deletes / noops）
+   - 显示冲突计数（红色提示）
+
+2. **计划（plan）**
+   - 点 "创建计划" → `PLAN_DRAFT`
+   - 显示 plan 标题 / 描述 / 步骤数 / 计划 id
+   - 表格列出每个 step：序号、操作 tag、目标 id、
+     expected → desired diff、原因
+   - 高风险 step 数量红色告警
+
+3. **执行（execute）**
+   - 点 "批准" → `APPROVE`（高风险时弹二次确认）
+   - 显示令牌前 16 位 + 过期时间
+   - 点 "执行" → `EXECUTE`
+   - 执行完成后显示 `el-result`：
+     - success: 全部成功
+     - warning: 部分成功 / 失败 / 已补偿
+   - 自动 `store.load()` 刷新书签列表
+
+UI 验证（Playwright + 自带 http server）：
+- 按钮 "导入 JSON 备份" 正确渲染
+- 点击打开对话框，正确显示三种模式
+- 上传 sample-backup.json 后，"刷新预览" 按钮启用
+- 文件名 "sample-backup.json" 显示在按钮旁
+- 整个 wizard 在 `el-dialog` 容器内，按 Esc 可关闭
 
 ### 阶段 3 阻塞项
 - ISS-3 关闭（链接检测）
-- UI 集成补完（导入按钮、计划预览）
 - 真实 Chrome 端 import / approve / execute 流程验收
+- 撤销 UI（rollbackPlan 消息类型）
 
 ## 6. 阶段 2 验收结论
 

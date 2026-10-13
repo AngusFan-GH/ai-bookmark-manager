@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus';
 import { useBookmarkStore } from '../../src/store';
 import { request } from '../../src/client';
 import type { FolderRecord } from '../../src/domain/bookmarks/types';
+import ImportFlow from './components/ImportFlow.vue';
 
 const store = useBookmarkStore();
 const query = ref('');
@@ -48,7 +49,11 @@ onMounted(async () => {
 <template>
   <div class="shell">
     <header><div><h1>AI Bookmark Manager</h1><p>本地优先 · 书签管理工作台</p></div>
-      <div class="actions"><el-button :loading="syncing" @click="sync">重新同步</el-button><el-button type="primary" @click="backup">导出 JSON 备份</el-button></div>
+      <div class="actions">
+        <el-button :loading="syncing" @click="sync">重新同步</el-button>
+        <el-button @click="backup">导出 JSON 备份</el-button>
+        <ImportFlow />
+      </div>
     </header>
     <div class="stats">
       <el-card shadow="never"><div class="number">{{ store.stats.bookmarks }}</div><span>书签总数</span></el-card>
@@ -68,7 +73,7 @@ onMounted(async () => {
       </el-table>
       <div class="footer"><span>共 {{ store.total }} 条（每页 200 条）</span><el-pagination v-model:current-page="page" :page-size="200" layout="prev, pager, next" :total="store.total"/></div>
     </el-card>
-    <p class="notice">本版本仅索引与备份，不会删除、移动或重命名浏览器书签。JSON 备份包含完整书签树和本地索引。</p>
+    <p class="notice">导入 JSON 备份是受控操作：仅在批准后才写入浏览器。删除操作会要求二次确认。所有写入由 OperationExecutor 统一执行并产生审计日志。</p>
   </div>
 </template>
 <style scoped>
