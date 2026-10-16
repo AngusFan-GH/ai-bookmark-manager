@@ -16,12 +16,11 @@ import {
   type DnsResolver,
 } from './url-guard';
 import {
-  fetchOnce,
+  probeUrl,
   type FetchLikeFn,
   type FetchClientDeps,
 } from './fetch-client';
 import { classify } from './classifier';
-import { shouldRetryAsGet } from './fetch-client';
 import { TaskScheduler, type SchedulerAttemptResult, type SchedulerInputItem } from './scheduler';
 import { DEFAULT_HEALTH_CONFIG } from './types';
 
@@ -180,7 +179,7 @@ export class HealthService {
 
     this.total = items.length + skipped;
     this.status = 'running';
-    const scheduler = this.makeScheduler();
+    const scheduler = this.makeScheduler(allowPrivate);
     this.scheduler = scheduler;
     const added = scheduler.enqueue(items);
     void scheduler.drain().then(() => {
@@ -217,11 +216,11 @@ export class HealthService {
     };
   }
 
-  private makeScheduler(): TaskScheduler {
+  private makeScheduler(allowPrivateHosts: boolean): TaskScheduler {
     const deps = this.deps;
     const service = this;
     return new TaskScheduler({
-      probe: async (bookmarkId, url, attempt, signal): Promise<SchedulerAttemptResult> => {
+      probe: async (bookmarkId, url, attempt, signal, priorDeadResponses): Promise<SchedulerAttemptResult> => {
         const clientDeps: FetchClientDeps = {
           fetch: deps.fetch,
           defaultMaxRedirects: deps.config.defaultMaxRedirects,
@@ -231,13 +230,11 @@ export class HealthService {
         };
         // HEAD is an inexpensive positive check only. Any non-2xx or network
         // response is confirmed with a bounded GET before classification.
-        const head = await fetchOnce(url, 'HEAD', clientDeps, { ...(deps.dns ? { dns: deps.dns } : {}), signal });
-        let outcome = head;
-        let method: 'HEAD' | 'GET' = 'HEAD';
-        if (!head.redirectBlocked && (head.httpCode === 0 || shouldRetryAsGet(head.httpCode))) {
-          const get = await fetchOnce(url, 'GET', clientDeps, { ...(deps.dns ? { dns: deps.dns } : {}), signal });
-          outcome = get;
-          method = 'GET';
+        const { outcome, method } = await probeUrl(url, clientDeps, {
+          ...(deps.dns ? { dns: deps.dns } : {}), signal, allowPrivateHosts,
+        });
+        if (signal.aborted) {
+          return { status: 'network_error', final: true, errorCode: 'abort', evidence: ['cancelled'] };
         }
         if (outcome.redirectBlocked) {
           return {
@@ -256,7 +253,7 @@ export class HealthService {
               return {
                 status: 'unsupported',
                 final: true,
-                evidence: [...(head.networkError ? ['head: ' + head.networkError] : []), 'redirect-to-private: ' + r2.reason],
+                evidence: [...(outcome.networkError ? ['network: ' + outcome.networkError] : []), 'redirect-to-private: ' + r2.reason],
               };
             }
           } catch { /* ignore parse failure */ }
@@ -266,6 +263,7 @@ export class HealthService {
           httpCode: outcome.httpCode,
           networkError: outcome.networkError,
           attempts: attempt,
+          priorDeadResponses,
           retryAfterSec: outcome.retryAfterSec,
         });
         const evidence: string[] = [];

@@ -39,7 +39,7 @@ export interface SchedulerAttemptResult {
 
 export interface SchedulerDeps {
   /** Run one probe and return the result. */
-  probe(bookmarkId: string, url: string, attempt: number, signal: AbortSignal): Promise<SchedulerAttemptResult>;
+  probe(bookmarkId: string, url: string, attempt: number, signal: AbortSignal, priorDeadResponses: number): Promise<SchedulerAttemptResult>;
   /** Persist the new check record. */
   saveCheck(rec: LinkCheckRecord): Promise<void>;
   /** Wall-clock. */
@@ -207,15 +207,17 @@ export class TaskScheduler {
         if (this.state.cancelled.has(it.bookmarkId)) return;
         // Per-attempt loop with retry budget
         let attempt = 0;
+        let priorDeadResponses = 0;
         let lastResult: SchedulerAttemptResult | null = null;
         while (attempt <= this.deps.maxRetries) {
           if (this.state.cancelled.has(it.bookmarkId)) {
             itemAc.abort();
             return;
           }
-          const result = await this.deps.probe(it.bookmarkId, it.url, attempt, itemAc.signal);
+          const result = await this.deps.probe(it.bookmarkId, it.url, attempt, itemAc.signal, priorDeadResponses);
           if (this.state.cancelled.has(it.bookmarkId)) return;
           lastResult = result;
+          if (result.httpCode === 404 || result.httpCode === 410) priorDeadResponses += 1;
 
           // Persist every attempt? The dev guide's audit log covers
           // operations; for health we keep just the final record.
@@ -258,6 +260,9 @@ export class TaskScheduler {
                 bookmarkId: it.bookmarkId,
                 url: it.url,
                 status: result.status,
+                httpCode: result.httpCode,
+                finalUrl: result.finalUrl,
+                errorCode: result.errorCode,
                 checkedAt: this.deps.now(),
                 evidence: result.evidence,
                 syncGeneration: it.syncGeneration,

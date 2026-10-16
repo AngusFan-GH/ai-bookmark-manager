@@ -21,12 +21,13 @@ import type {
   OperationStep,
   TreeSnapshot,
   OperationAuditEntry,
+  OperationAction,
 } from './types';
 import { AppErrorImpl } from '../../shared/errors';
 import { validateImport, hasForbiddenKeys } from './import';
 import { diffImport, type ImportMode, type DiffOp, type FlatNode } from './diff';
 import { validatePlan } from './validator';
-import { OperationExecutor, type ExecutorDeps } from './executor';
+import { OperationExecutor, type ExecutorDeps, type BookmarkApiNode } from './executor';
 import { hashApprovedPlan } from './plan-hash';
 
 export interface PlanServiceDeps {
@@ -50,9 +51,20 @@ export interface PlanServiceDeps {
     put(a: Approval): Promise<void>;
     take(token: string): Promise<Approval | undefined>;
   };
+  captureLocalIndex?(): Promise<TreeSnapshot['localIndex']>;
   currentSyncGeneration(): number;
   newId(): string;
   now(): number;
+}
+
+export interface OrganizationStepInput {
+  action: OperationAction;
+  targetBrowserId?: string;
+  parentBrowserId?: string;
+  /** Move into a folder created by an earlier step in this input. */
+  parentStepIndex?: number;
+  desiredAfter?: { title?: string; url?: string; index?: number };
+  reason?: string;
 }
 
 export interface ImportPreviewSummary {
@@ -71,6 +83,17 @@ export class PlanService {
   constructor(private readonly deps: PlanServiceDeps) {
     this.executor = new OperationExecutor({
       bookmarksApi: deps.bookmarksApi,
+      captureSnapshot: async plan => {
+        const snap: TreeSnapshot = {
+          id: deps.newId(), planId: plan.id, createdAt: deps.now(),
+          syncGeneration: deps.currentSyncGeneration(), tree: await deps.bookmarksApi.getTree(),
+          localIndex: await deps.captureLocalIndex?.() ?? { bookmarks: [], folders: [] },
+          reason: `immediately before execution of ${plan.id}`,
+        };
+        await deps.snapshotsStore.put(snap);
+        plan.metadata['plan-service.snapshot'] = snap.id;
+        await deps.plansStore.put(plan);
+      },
       savePlan: (p) => deps.plansStore.put(p),
       saveStep: (s) => deps.stepsStore.put(s),
       saveAudit: (e) => deps.auditStore.append(e),
@@ -81,15 +104,26 @@ export class PlanService {
       now: () => deps.now(),
       validate: async (p) => { validatePlan(p); },
       assertStillValid: async (step) => {
-        if (step.action === 'create') {
-          if (!step.parentBrowserId) throw new AppErrorImpl('PLAN_STALE', 'create target folder is missing', false);
-          await deps.bookmarksApi.get(step.parentBrowserId);
-          return;
+        if (step.action === 'create' || step.action === 'move') {
+          if (!step.parentBrowserId) throw new AppErrorImpl('PLAN_STALE', 'destination folder is missing', false);
+          const parent = await deps.bookmarksApi.get(step.parentBrowserId);
+          if (parent.url !== undefined || parent.id === '0') throw new AppErrorImpl('PLAN_STALE', 'destination is not a writable folder', false);
+          if (step.action === 'move') {
+            let ancestor: BookmarkApiNode | undefined = parent;
+            const visited = new Set<string>();
+            while (ancestor) {
+              if (ancestor.id === step.targetBrowserId || visited.has(ancestor.id)) throw new AppErrorImpl('PLAN_STALE', 'move would create a cycle', false);
+              visited.add(ancestor.id);
+              ancestor = ancestor.parentId ? await deps.bookmarksApi.get(ancestor.parentId) : undefined;
+            }
+          }
         }
+        if (step.action === 'create') return;
         if (!step.targetBrowserId) throw new AppErrorImpl('PLAN_STALE', 'operation target is missing', false);
         const live = await deps.bookmarksApi.get(step.targetBrowserId);
+        if (!live.parentId || live.parentId === '0' || live.id === '0') throw new AppErrorImpl('PLAN_STALE', 'protected browser folder', false);
         for (const [key, expected] of Object.entries(step.expectedBefore)) {
-          if ((live as unknown as Record<string, unknown>)[key] !== expected) {
+          if (((live as unknown as Record<string, unknown>)[key] ?? null) !== expected) {
             throw new AppErrorImpl('PLAN_STALE', `target changed: ${key}`, false);
           }
         }
@@ -134,15 +168,17 @@ export class PlanService {
    */
   async draftPlan(rawJson: string, mode: ImportMode, title = 'Import from backup'): Promise<OperationPlan> {
     const payload = validateImport(rawJson);
+    if (hasForbiddenKeys(payload)) throw new AppErrorImpl('INVALID_REQUEST', 'import contains forbidden fields', false);
     const importTree = (payload.browserTree as unknown as FlatNode[]);
     const liveTree = await this.deps.bookmarksApi.getTree();
     const diff = diffImport(importTree as FlatNode[], liveTree as unknown as FlatNode[], mode);
     const basedOnGeneration = this.deps.currentSyncGeneration();
 
-    // Capture a snapshot for undo before any writes.
+    const planId = this.deps.newId();
+    // Preview backup supplements the mandatory fresh execution backup.
     const snap: TreeSnapshot = {
       id: this.deps.newId(),
-      planId: null,
+      planId,
       createdAt: this.deps.now(),
       syncGeneration: basedOnGeneration,
       tree: liveTree,
@@ -151,12 +187,35 @@ export class PlanService {
     };
     await this.deps.snapshotsStore.put(snap);
 
-    const steps: OperationStep[] = diff.ops
-      .filter((o) => o.kind === 'add' || o.kind === 'update' || o.kind === 'move' || o.kind === 'delete')
-      .map((o, i) => this.opToStep(o, i, this.deps.newId()));
+    const liveById = new Map<string, BookmarkApiNode>();
+    const visit = (nodes: BookmarkApiNode[]) => { for (const n of nodes) { liveById.set(n.id, n); visit(n.children ?? []); } };
+    visit(liveTree);
+    const ops = diff.ops.filter(o => o.kind !== 'noop');
+    // Empty-only browser removal requires descendants before their folders.
+    const orderedOps = [...ops.filter(o => o.kind !== 'delete'), ...ops.filter(o => o.kind === 'delete').reverse()];
+    const steps = orderedOps.map((op, i) => {
+      const step = this.opToStep(op, i, planId);
+      if (op.kind !== 'add') {
+        const node = liveById.get(op.id);
+        if (!node) throw new AppErrorImpl('PLAN_STALE', 'target disappeared', false);
+        if (!node.parentId || node.parentId === '0' || node.id === '0') throw new AppErrorImpl('INVALID_REQUEST', 'import would modify a protected browser folder', false);
+        step.expectedBefore = expectedState(node);
+        // A preceding update in this same plan intentionally changes title/url.
+        if (op.kind === 'move') {
+          const update = orderedOps.find(o => o.kind === 'update' && o.id === op.id);
+          if (update?.kind === 'update') Object.assign(step.expectedBefore, { title: update.toTitle, url: update.toUrl ?? null });
+        }
+      }
+      return step;
+    });
+    const creates = new Map(orderedOps.flatMap((op, i) => op.kind === 'add' ? [[op.id, steps[i]] as const] : []));
+    for (const step of steps) {
+      const parent = step.parentBrowserId ? creates.get(step.parentBrowserId) : undefined;
+      if (parent) { step.parentStepId = parent.id; step.dependsOn.push(parent.id); }
+    }
 
     const plan: OperationPlan = {
-      id: this.deps.newId(),
+      id: planId,
       title,
       description: `Mode: ${mode}. Conflicts: ${diff.conflicts.length}.`,
       createdAt: this.deps.now(),
@@ -176,10 +235,10 @@ export class PlanService {
     return plan;
   }
 
-  private opToStep(op: DiffOp, order: number, _planIdHint: string): OperationStep {
+  private opToStep(op: DiffOp, order: number, planId: string): OperationStep {
     const base = {
       id: this.deps.newId(),
-      planId: 'PENDING', // filled in by caller before persist
+      planId,
       order,
       reason: 'import diff',
       riskLevel: op.kind === 'delete' ? 'high' as const : 'low' as const,
@@ -284,6 +343,81 @@ export class PlanService {
     return this.executor.execute(plan, { approvalToken, dryRun });
   }
 
+  async getPlanSnapshots(planId: string): Promise<TreeSnapshot[]> {
+    return this.deps.snapshotsStore.listByPlan(planId);
+  }
+
+  async draftOrganization(input: { title?: string; steps: OrganizationStepInput[] }): Promise<OperationPlan> {
+    if (!input || !Array.isArray(input.steps) || !input.steps.length || input.steps.length > 1000) {
+      throw new AppErrorImpl('INVALID_REQUEST', 'provide between 1 and 1000 organization steps', false);
+    }
+    const planId = this.deps.newId();
+    const steps: OperationStep[] = [];
+    const seen = new Set<string>();
+    for (const [order, request] of input.steps.entries()) {
+      if (!['create', 'update', 'rename', 'move', 'delete'].includes(request.action)) throw new AppErrorImpl('INVALID_REQUEST', 'invalid organization action', false);
+      const desiredAfter: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(request.desiredAfter ?? {})) {
+        if (!['title', 'url', 'index'].includes(key)) throw new AppErrorImpl('INVALID_REQUEST', 'unsupported desired field', false);
+        if (key === 'index' ? typeof value !== 'number' || !Number.isInteger(value) || value < 0 : typeof value !== 'string') throw new AppErrorImpl('INVALID_REQUEST', 'invalid desired field', false);
+        desiredAfter[key] = value;
+      }
+      const allowedFields = request.action === 'create' ? ['title', 'url', 'index'] : request.action === 'move' ? ['index'] : request.action === 'rename' ? ['title'] : request.action === 'update' ? ['title', 'url'] : [];
+      if (Object.keys(desiredAfter).some(key => !allowedFields.includes(key))) throw new AppErrorImpl('INVALID_REQUEST', 'field does not apply to action', false);
+      if (request.action === 'update' && !Object.keys(desiredAfter).length) throw new AppErrorImpl('INVALID_REQUEST', 'update requires changes', false);
+      let parentStep: OperationStep | undefined;
+      if (request.parentStepIndex !== undefined) {
+        if (request.action !== 'move' || request.parentBrowserId !== undefined || !Number.isInteger(request.parentStepIndex) || request.parentStepIndex < 0 || request.parentStepIndex >= order) {
+          throw new AppErrorImpl('INVALID_REQUEST', 'parent step must reference an earlier folder creation', false);
+        }
+        parentStep = steps[request.parentStepIndex];
+        if (!parentStep || parentStep.action !== 'create' || parentStep.desiredAfter.url !== undefined) {
+          throw new AppErrorImpl('INVALID_REQUEST', 'parent step must create a folder', false);
+        }
+      }
+      if (request.action === 'move' && !parentStep) desiredAfter.parentId = request.parentBrowserId;
+      if (request.action === 'delete' && Object.keys(desiredAfter).length) throw new AppErrorImpl('INVALID_REQUEST', 'delete does not accept desired fields', false);
+      if (request.action === 'rename' && typeof desiredAfter.title !== 'string') throw new AppErrorImpl('INVALID_REQUEST', 'rename requires title', false);
+      let expectedBefore: Record<string, unknown> = {};
+      if (request.action !== 'create') {
+        if (!request.targetBrowserId || seen.has(request.targetBrowserId)) throw new AppErrorImpl('INVALID_REQUEST', 'each target must appear once', false);
+        const node = await this.deps.bookmarksApi.get(request.targetBrowserId);
+        if (!node.parentId || node.parentId === '0' || node.id === '0') throw new AppErrorImpl('INVALID_REQUEST', 'protected browser folder', false);
+        expectedBefore = expectedState(node); seen.add(node.id);
+      }
+      if (request.action === 'create' || (request.action === 'move' && !parentStep)) {
+        const parent = request.parentBrowserId ? await this.deps.bookmarksApi.get(request.parentBrowserId) : undefined;
+        if (!parent || parent.url !== undefined || parent.id === '0') throw new AppErrorImpl('INVALID_REQUEST', 'destination must be a writable folder', false);
+        if (request.action === 'move') {
+          let ancestor: BookmarkApiNode | undefined = parent;
+          const visited = new Set<string>();
+          while (ancestor) {
+            if (ancestor.id === request.targetBrowserId || visited.has(ancestor.id)) throw new AppErrorImpl('INVALID_REQUEST', 'move would create a cycle', false);
+            visited.add(ancestor.id);
+            ancestor = ancestor.parentId ? await this.deps.bookmarksApi.get(ancestor.parentId) : undefined;
+          }
+        }
+      }
+      steps.push({ id: this.deps.newId(), planId, order, action: request.action, targetBrowserId: request.targetBrowserId ?? null,
+        parentBrowserId: request.parentBrowserId ?? null, ...(parentStep ? { parentStepId: parentStep.id } : {}), expectedBefore, desiredAfter, reason: request.reason || 'User-requested organization',
+        riskLevel: request.action === 'delete' ? 'high' : 'medium', dependsOn: parentStep ? [parentStep.id] : [], status: 'pending', inverseOfId: null, errorMessage: null, evidence: ['live browser state at draft'] });
+    }
+    const plan: OperationPlan = { id: planId, title: input.title || 'Organize bookmarks', description: 'Review native bookmark changes before approving.',
+      createdAt: this.deps.now(), approvedAt: null, basedOnGeneration: this.deps.currentSyncGeneration(), steps, status: 'draft', metadata: { 'plan-service.mode': 'organization' } };
+    validatePlan(plan);
+    const snapshot: TreeSnapshot = {
+      id: this.deps.newId(), planId, createdAt: this.deps.now(), syncGeneration: this.deps.currentSyncGeneration(),
+      tree: await this.deps.bookmarksApi.getTree(),
+      localIndex: await this.deps.captureLocalIndex?.() ?? { bookmarks: [], folders: [] },
+      reason: `organization preview for ${planId}`,
+    };
+    await this.deps.snapshotsStore.put(snapshot);
+    plan.metadata['plan-service.snapshot'] = snapshot.id;
+    await this.deps.plansStore.put(plan);
+    for (const step of steps) await this.deps.stepsStore.put(step);
+    return plan;
+  }
+
   async listPlans(): Promise<OperationPlan[]> {
     return this.deps.plansStore.list();
   }
@@ -295,4 +429,10 @@ export class PlanService {
   async getPlanSteps(planId: string): Promise<OperationStep[]> {
     return this.deps.stepsStore.listByPlan(planId);
   }
+}
+
+/** Null explicitly records absent fields across JSON persistence. Index is
+ * excluded because preceding sibling operations legitimately renumber it. */
+function expectedState(node: BookmarkApiNode): Record<string, unknown> {
+  return { title: node.title ?? null, url: node.url ?? null, parentId: node.parentId ?? null, dateAdded: node.dateAdded ?? null };
 }

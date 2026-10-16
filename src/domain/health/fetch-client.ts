@@ -35,6 +35,7 @@ export interface FetchLikeRequest {
   signal?: AbortSignal;
   /** Optional platform DNS resolver. Browser extensions normally lack one. */
   dns?: DnsResolver;
+  allowPrivateHosts?: boolean;
 }
 
 export type FetchLikeFn = (req: FetchLikeRequest) => Promise<FetchLikeResponse>;
@@ -90,12 +91,19 @@ export async function fetchOnce(
   const signal = opts.signal;
   const dns = opts.dns;
 
+  const abortedOutcome = (): FetchAttemptOutcome => ({
+    httpCode: 0, finalUrl: url, redirectCount: 0, networkError: 'abort',
+    rawError: 'AbortError: Request aborted', retryAfterSec: null,
+  });
+  if (signal?.aborted) return abortedOutcome();
+
   // A browser extension has no portable Node-style DNS API. Only perform a
   // DNS check when a platform resolver is explicitly supplied; do not treat
   // an empty fallback result as proof that a host is public.
   if (dns) {
     const host = new URL(url).hostname;
-    const dnsCheck = await guardResolvedHost(host, dns);
+    const dnsCheck = await guardResolvedHost(host, dns, { allowPrivateHosts: opts.allowPrivateHosts });
+    if (signal?.aborted) return abortedOutcome();
     if (!dnsCheck.ok) {
       return {
         httpCode: 0,
@@ -110,13 +118,15 @@ export async function fetchOnce(
 
   const ac = new AbortController();
   const timeout = setTimeout(() => ac.abort(), timeoutMs);
-  if (signal) {
-    signal.addEventListener('abort', () => ac.abort(), { once: true });
-  }
+  const onAbort = () => ac.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) ac.abort();
   try {
+    if (ac.signal.aborted) return abortedOutcome();
     const resp = await deps.fetch({
       method, url, timeoutMs, maxRedirects, maxResponseBytes, userAgent, signal: ac.signal, ...(dns ? { dns } : {}),
     });
+    if (ac.signal.aborted) return abortedOutcome();
     return {
       httpCode: resp.status,
       finalUrl: resp.url,
@@ -128,7 +138,7 @@ export async function fetchOnce(
       ...(resp.redirectBlocked ? { redirectBlocked: true } : {}),
     };
   } catch (err) {
-    const stage = mapErrorStage(err);
+    const stage = ac.signal.aborted ? 'abort' : mapErrorStage(err);
     return {
       httpCode: 0,
       finalUrl: url,
@@ -139,6 +149,7 @@ export async function fetchOnce(
     };
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -236,7 +247,7 @@ export async function probeUrl(
   opts: Partial<FetchLikeRequest> = {},
 ): Promise<{ outcome: FetchAttemptOutcome; method: 'HEAD' | 'GET' }> {
   const head = await fetchOnce(url, 'HEAD', deps, opts);
-  if (head.redirectBlocked || (head.httpCode > 0 && !shouldRetryAsGet(head.httpCode))) {
+  if (opts.signal?.aborted || head.networkError === 'abort' || head.redirectBlocked || (head.httpCode > 0 && !shouldRetryAsGet(head.httpCode))) {
     return { outcome: head, method: 'HEAD' };
   }
   // HEAD failed or was uninformative; try GET (still bounded).

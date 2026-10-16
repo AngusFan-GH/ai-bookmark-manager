@@ -71,6 +71,8 @@ export interface ExecutorDeps {
     move(id: string, destination: MoveBookmarkInput): Promise<void>;
     remove(id: string): Promise<void>;
   };
+  /** Must durably capture a fresh recovery snapshot before any native write. */
+  captureSnapshot(plan: OperationPlan): Promise<void>;
   /** Persist a plan and its updated steps. */
   savePlan(plan: OperationPlan): Promise<void>;
   /** Persist a single step's updated state. */
@@ -171,11 +173,15 @@ export class OperationExecutor {
     // state on each step separately (assertStillValid).
     await this.deps.validate(plan);
 
+    if (plan.steps.length && !opts.dryRun) await this.deps.captureSnapshot(plan);
+
     const ordered = sortSteps(plan.steps);
     let succeeded = 0;
     let failed = 0;
     let compensated = 0;
     const succeededSteps: OperationStep[] = [];
+    const observedAfter = new Map<string, Record<string, unknown>>();
+    const originalIndices = new Map<string, number>();
 
     for (const step of ordered) {
       if (failed > 0) {
@@ -200,9 +206,16 @@ export class OperationExecutor {
         continue;
       }
 
-      // Re-validate live state.
+      // Resolve imported/new folder references only after their create succeeded.
+      let executionStep = step;
       try {
-        await this.deps.assertStillValid(step);
+        if (step.parentStepId) {
+          const parent = succeededSteps.find(s => s.id === step.parentStepId);
+          const parentId = parent?.desiredAfter.createdBrowserId;
+          if (typeof parentId !== 'string') throw new AppErrorImpl('PLAN_STALE', 'created parent is unavailable', false);
+          executionStep = { ...step, parentBrowserId: parentId, desiredAfter: { ...step.desiredAfter, ...(step.action === 'move' ? { parentId } : {}) } };
+        }
+        await this.deps.assertStillValid(executionStep);
       } catch (err) {
         step.status = 'failed';
         step.errorMessage = err instanceof Error ? err.message : String(err);
@@ -228,12 +241,34 @@ export class OperationExecutor {
         step.status = 'running';
         await this.deps.saveStep(step);
         await this.audit(plan, step, 'started');
-        const createdBrowserId = await this.apply(step);
+        if (executionStep.action === 'move' && executionStep.targetBrowserId) {
+          const before = await this.deps.bookmarksApi.get(executionStep.targetBrowserId);
+          if (typeof before.index === 'number') originalIndices.set(step.id, before.index);
+        }
+        const createdBrowserId = await this.apply(executionStep);
         if (createdBrowserId) step.desiredAfter.createdBrowserId = createdBrowserId;
         step.status = 'succeeded';
         step.errorMessage = null;
         succeeded += 1;
         succeededSteps.push(step);
+        if (step.action !== 'delete') {
+          try {
+            const targetId = createdBrowserId || step.targetBrowserId;
+            if (!targetId) throw new Error('missing written target');
+            const observed = stateForCompensation(await this.deps.bookmarksApi.get(targetId));
+            // A concurrent edit may arrive even between the write and readback.
+            // Do not adopt such an edit as the state that we are free to undo.
+            const intendedFields = step.action === 'move' ? ['parentId', 'index'] : ['title', 'url'];
+            for (const key of intendedFields) {
+              if (executionStep.desiredAfter[key] !== undefined && executionStep.desiredAfter[key] !== observed[key]) {
+                throw new Error('written target changed before readback');
+              }
+            }
+            observedAfter.set(step.id, observed);
+          } catch {
+            await this.audit(plan, step, 'post-write state unavailable or changed; automatic compensation disabled');
+          }
+        }
         await this.deps.saveStep(step);
         await this.audit(plan, step, 'succeeded');
       } catch (err) {
@@ -254,7 +289,7 @@ export class OperationExecutor {
     if (failed > 0) {
       for (const s of [...succeededSteps].reverse()) {
         try {
-          await this.compensate(s);
+          await this.compensate(s, observedAfter.get(s.id), originalIndices.get(s.id));
           s.status = 'compensated';
           compensated += 1;
           await this.deps.saveStep(s);
@@ -365,8 +400,16 @@ export class OperationExecutor {
    * thrown. Dev guide § 3.7: "撤销是补偿操作，不保证恢复原 browserId
    * 或所有时间戳".
    */
-  private async compensate(step: OperationStep): Promise<void> {
+  private async compensate(step: OperationStep, observedAfter?: Record<string, unknown>, originalIndex?: number): Promise<void> {
     const api = this.deps.bookmarksApi;
+    if (step.action !== 'delete') {
+      const targetId = step.action === 'create' ? step.desiredAfter.createdBrowserId : step.targetBrowserId;
+      if (typeof targetId !== 'string' || !observedAfter) throw new AppErrorImpl('PLAN_STALE', 'compensation conflict: post-write state unavailable', false);
+      const live = stateForCompensation(await api.get(targetId));
+      if (Object.entries(observedAfter).some(([key, value]) => live[key] !== value)) {
+        throw new AppErrorImpl('PLAN_STALE', 'compensation conflict: target changed after this plan wrote it', false);
+      }
+    }
     switch (step.action) {
       case 'create': {
         // Find the newly created node by some marker. For now we expect
@@ -398,7 +441,8 @@ export class OperationExecutor {
         if (!step.targetBrowserId) return;
         const dest: MoveBookmarkInput = {};
         if (typeof step.expectedBefore.parentId === 'string') dest.parentId = step.expectedBefore.parentId;
-        if (typeof step.expectedBefore.index === 'number') dest.index = step.expectedBefore.index;
+        if (originalIndex !== undefined) dest.index = originalIndex;
+        else if (typeof step.expectedBefore.index === 'number') dest.index = step.expectedBefore.index;
         if (dest.parentId || dest.index !== undefined) await api.move(step.targetBrowserId, dest);
         return;
       }
@@ -434,4 +478,10 @@ export function sortSteps(steps: readonly OperationStep[]): OperationStep[] {
     if (a.order !== b.order) return a.order - b.order;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
+}
+
+/** Detached scalar state: API mocks and native event adapters may reuse nodes. */
+function stateForCompensation(node: BookmarkApiNode): Record<string, unknown> {
+  return { id: node.id, title: node.title ?? null, url: node.url ?? null,
+    parentId: node.parentId ?? null, index: node.index ?? null, dateAdded: node.dateAdded ?? null };
 }

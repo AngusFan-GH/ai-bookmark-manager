@@ -11,8 +11,8 @@
 // 扩展能完整实现服务器级 SSRF 防护." Our stance:
 //   - Reject anything we can statically identify as a private/loopback
 //     address.
-//   - For DNS-resolution defenses, mark the result 'unsupported' so
-//     the user knows we did not verify the resolved IP.
+//   - When a resolver is supplied, reject missing/unsafe answers. Standard
+//     browser extensions cannot verify the IP used by the network stack.
 //
 // Pure functions; no I/O. The DNS lookup is left to the caller
 // (the FetchClient) so URLGuard remains synchronous and testable.
@@ -40,8 +40,8 @@ const IPV4_PRIVATE_PATTERNS: Array<{ test: (ip: number) => boolean; label: strin
   // 100.64.0.0/10 CGNAT: 100.64.0.0 = 0x64400000, mask /10 = 0xffc00000.
   { test: (ip) => (ip & 0xffc00000) === 0x64400000, label: '100.64.0.0/10 (CGNAT)' },
   { test: (ip) => (ip >>> 16) === 0xa9fe, label: '169.254.0.0/16 (link-local)' },
-  { test: (ip) => (ip >>> 24) === 192 && ((ip >>> 16) & 0xff) === 0, label: '192.0.0.0/24 (IETF)' },
-  { test: (ip) => (ip >>> 24) === 192 && ((ip >>> 16) & 0xff) === 2, label: '192.0.2.0/24 (TEST-NET-1)' },
+  { test: (ip) => (ip >>> 8) === 0xc00000, label: '192.0.0.0/24 (IETF)' },
+  { test: (ip) => (ip >>> 8) === 0xc00002, label: '192.0.2.0/24 (TEST-NET-1)' },
   { test: (ip) => (ip >>> 24) === 198 && ((ip >>> 16) & 0xff) === 51 && ((ip >>> 8) & 0xff) === 100, label: '198.51.100.0/24 (TEST-NET-2)' },
   { test: (ip) => (ip >>> 24) === 203 && ((ip >>> 16) & 0xff) === 0 && ((ip >>> 8) & 0xff) === 113, label: '203.0.113.0/24 (TEST-NET-3)' },
   { test: (ip) => (ip >>> 24) >= 224, label: '224.0.0.0/4 (multicast/reserved)' },
@@ -90,9 +90,9 @@ export function guardUrl(raw: string, options: GuardOptions = {}): UrlGuardVerdi
   // explicit opt-in. When `allowPrivateHosts` is true, the private-IP
   // and loopback checks below are skipped.
   const allowPrivate = options.allowPrivateHosts === true;
-  const lower = host.toLowerCase().replace(/[\[\]]/g, '');
+  const lower = host.toLowerCase().replace(/[\[\]]/g, '').replace(/\.+$/, '');
   if (!allowPrivate) {
-    if (BLOCKED_HOSTS.has(lower)) {
+    if (BLOCKED_HOSTS.has(lower) || lower.endsWith('.localhost')) {
       return { ok: false, reason: `blocked host: ${lower}`, code: 'PRIVATE_HOST' };
     }
     if (lower.endsWith('.local') || lower.endsWith('.internal') || lower.endsWith('.lan')) {
@@ -126,8 +126,8 @@ export function guardUrl(raw: string, options: GuardOptions = {}): UrlGuardVerdi
  * check.
  *
  * We can't actually do DNS in a pure unit test, so the caller passes
- * a resolver hook. In production the resolver is `dns.lookup(host)`
- * via a small adapter; in tests we can mock it.
+ * a resolver hook. Standard browser extensions do not expose a resolver;
+ * tests can inject a mock without making network requests.
  */
 export interface DnsResolver {
   lookup(host: string): Promise<string[]>;
@@ -145,6 +145,9 @@ export async function guardResolvedHost(host: string, resolver: DnsResolver, opt
   } catch {
     return { ok: false, reason: 'DNS lookup failed', addresses: [] };
   }
+  if (addrs.length === 0) {
+    return { ok: false, reason: 'DNS returned no addresses', addresses: [] };
+  }
   for (const addr of addrs) {
     if (isPrivateLiteralAddress(addr)) {
       return { ok: false, reason: `resolved to private address: ${addr}`, addresses: addrs };
@@ -158,28 +161,32 @@ export async function guardResolvedHost(host: string, resolver: DnsResolver, opt
  * link-local range? Pure check, no DNS.
  */
 export function isPrivateLiteralAddress(addr: string): boolean {
-  const clean = addr.replace(/[\[\]]/g, '');
+  // URL canonicalization handles abbreviated/hex IPv4, expanded IPv6,
+  // and hexadecimal IPv4-mapped IPv6 consistently with browser requests.
+  let clean: string;
+  try {
+    const input = addr.replace(/^\[|\]$/g, '');
+    if (!/^[0-9a-fA-F:.]+$/.test(input)) return true;
+    clean = new URL(input.includes(':') ? `http://[${input}]/` : `http://${input}/`).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return true; // An invalid resolver answer is not proof of a public IP.
+  }
   if (/^\d+\.\d+\.\d+\.\d+$/.test(clean)) {
     const ip = ipv4ToInt(clean);
-    if (ip === null) return true;
-    return IPV4_PRIVATE_PATTERNS.some((p) => p.test(ip));
+    return ip === null || IPV4_PRIVATE_PATTERNS.some((p) => p.test(ip));
   }
   if (clean.includes(':')) {
-    // IPv6 — conservatively reject all non-globally-unicast addresses.
-    const lc = clean.toLowerCase().split('%')[0];
-    if (lc === '::' || lc === '::1' || lc === '::0') return true;
-    if (lc.startsWith('fe80:') || lc.startsWith('fe8') || lc.startsWith('fe9') || lc.startsWith('fea') || lc.startsWith('feb')) return true;
-    if (lc.startsWith('fc') || lc.startsWith('fd')) return true; // ULA
-    if (lc.startsWith('ff')) return true; // multicast
-    // ::ffff:a.b.c.d mapped IPv4
-    const mapped = /^::ffff:([0-9.]+)$/i.exec(lc);
+    const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(clean);
     if (mapped) {
-      const ip = ipv4ToInt(mapped[1]);
-      if (ip !== null) return IPV4_PRIVATE_PATTERNS.some((p) => p.test(ip));
+      const ip = (parseInt(mapped[1], 16) * 65536 + parseInt(mapped[2], 16)) >>> 0;
+      return IPV4_PRIVATE_PATTERNS.some((p) => p.test(ip));
     }
-    return false; // global unicast
+    // Only global-unicast space is eligible. DNS checks are best effort,
+    // not a claim of rebinding protection in the browser network stack.
+    const first = parseInt(clean.split(':')[0], 16);
+    return !(first >= 0x2000 && first <= 0x3fff) || clean.startsWith('2001:db8:');
   }
-  return false;
+  return true;
 }
 
 function ipv4ToInt(ip: string): number | null {

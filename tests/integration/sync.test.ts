@@ -225,3 +225,19 @@ describe('DebouncedSync — event coalescing', () => {
     expect(rows).toHaveLength(2);
   });
 });
+
+it('reconciles dirty events received while a previous snapshot is in flight', async () => {
+  const db = createTestDatabase(`dirty-${Math.random()}`);
+  let release!: () => void; let started!: () => void; let reads = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const reading = new Promise<void>(resolve => { started = resolve; });
+  const coordinator = new SyncCoordinator({
+    db: db as any,
+    readTree: async () => { reads++; if (reads === 1) { started(); await gate; return makeFlatTree(1); } return makeFlatTree(2); },
+    readState: async () => storedState, writeState: async s => { storedState = s; }, nextGeneration: n => n + 1, now: Date.now,
+  });
+  const first = coordinator.fullSync('startup'); await reading;
+  const second = coordinator.fullSync('event'); release();
+  await Promise.all([first, second]);
+  expect(reads).toBe(2); expect(await db.bookmarks.count()).toBe(2);
+});

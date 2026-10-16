@@ -85,6 +85,7 @@ function makeDeps() {
     api,
     deps: {
       bookmarksApi: api,
+      captureSnapshot: vi.fn(async () => undefined),
       savePlan: vi.fn(async (p: OperationPlan) => { currentPlans.set(p.id, JSON.parse(JSON.stringify(p))); }),
       saveStep: vi.fn(async (s: OperationStep) => { currentSteps.set(s.id, JSON.parse(JSON.stringify(s))); }),
       saveAudit: vi.fn(async (e: OperationAuditEntry) => { currentAudit.push(JSON.parse(JSON.stringify(e))); }),
@@ -326,4 +327,49 @@ describe('OperationExecutor — assertStillValid and dry-run', () => {
     expect(api.move).not.toHaveBeenCalled();
     expect(api.remove).not.toHaveBeenCalled();
   });
+});
+
+it('preserves external edits to successful steps instead of forcing compensation', async () => {
+  currentTree = [{ id: 'A', children: [
+    { id: 'b1', title: 'original', parentId: 'A' }, { id: 'b2', title: 'second', parentId: 'A' },
+  ] }];
+  const { deps, api } = makeDeps();
+  api.update.mockImplementation(async (id, changes) => {
+    if (id === 'b2') { findById(currentTree, 'b1')!.title = 'External edit'; throw new Error('later failure'); }
+    Object.assign(findById(currentTree, id)!, changes);
+  });
+  const a = makeApproval('p1'); currentApprovals.set(a.token, a);
+  const result = await new OperationExecutor(deps).execute(makePlan([
+    makeStep({ id: 'first', targetBrowserId: 'b1', expectedBefore: { title: 'original' }, desiredAfter: { title: 'planned' } }),
+    makeStep({ id: 'second', order: 1, targetBrowserId: 'b2', desiredAfter: { title: 'fail' } }),
+  ]), { approvalToken: a.token });
+  expect(findById(currentTree, 'b1')!.title).toBe('External edit');
+  expect(result.compensated).toBe(0);
+  expect(currentAudit.some(e => e.message.includes('compensation conflict'))).toBe(true);
+});
+
+it('restores a moved bookmark to its original index when compensation is safe', async () => {
+  currentTree = [{ id: 'A', children: [
+    { id: 'b1', title: 'original', parentId: 'A', index: 7 }, { id: 'b2', title: 'second', parentId: 'A' },
+  ] }, { id: 'B', children: [] }];
+  const { deps, api } = makeDeps(); api.update.mockRejectedValue(new Error('later failure'));
+  const a = makeApproval('p1'); currentApprovals.set(a.token, a);
+  await new OperationExecutor(deps).execute(makePlan([
+    makeStep({ id: 'first', action: 'move', targetBrowserId: 'b1', expectedBefore: { parentId: 'A' }, desiredAfter: { parentId: 'B', index: 0 } }),
+    makeStep({ id: 'second', order: 1, targetBrowserId: 'b2' }),
+  ]), { approvalToken: a.token });
+  expect(api.move).toHaveBeenLastCalledWith('b1', { parentId: 'A', index: 7 });
+});
+it('does not remove a newly created bookmark that was externally edited before rollback', async () => {
+  currentTree = [{ id: 'root', title: 'root', children: [{ id: 'b2', title: 'second', parentId: 'root' }] }];
+  const { deps, api } = makeDeps();
+  api.update.mockImplementation(async () => {
+    currentTree[0].children!.find(n => n.id !== 'b2')!.url = 'https://external.test';
+    throw new Error('later failure');
+  });
+  const a = makeApproval('p1'); currentApprovals.set(a.token, a);
+  const create = makeStep({ id: 'first', action: 'create', targetBrowserId: null, parentBrowserId: 'root', desiredAfter: { title: 'Created', url: 'https://original.test' } });
+  await new OperationExecutor(deps).execute(makePlan([create, makeStep({ id: 'second', order: 1, targetBrowserId: 'b2' })]), { approvalToken: a.token });
+  expect(api.remove).not.toHaveBeenCalled();
+  expect(findById(currentTree, String(create.desiredAfter.createdBrowserId))?.url).toBe('https://external.test');
 });

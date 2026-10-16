@@ -100,7 +100,7 @@ export function diffImport(
     if (liveNode) {
       const sameTitle = impNode.title === liveNode.title;
       const sameUrl = (impNode.url ?? '') === (liveNode.url ?? '');
-      const sameParent = impNode.parentId === liveNode.parentId;
+      const sameParent = imp.parentById.get(id) === live.parentById.get(id);
       if (sameTitle && sameUrl && sameParent) {
         ops.push({ kind: 'noop', id, path, reason: 'unchanged' });
       } else if (mode === 'additive' || mode === 'additive-with-meta') {
@@ -124,8 +124,8 @@ export function diffImport(
             kind: 'move',
             id,
             path,
-            fromParentId: liveNode.parentId,
-            toParentId: impNode.parentId,
+            fromParentId: live.parentById.get(id) ?? null,
+            toParentId: imp.parentById.get(id) ?? null,
           });
         }
       }
@@ -133,7 +133,7 @@ export function diffImport(
       // id missing in live. Add it.
       // The parent must exist in live (either as a real node, or be
       // scheduled for addition in the same plan).
-      const parentId = impNode.parentId;
+      const parentId = imp.parentById.get(id) ?? null;
       const liveParent = parentId !== null ? live.byId.get(parentId) : null;
       const parentWillBeAdded = parentId !== null && !liveParent && imp.byId.has(parentId);
       if (parentId !== null && !liveParent && !parentWillBeAdded) {

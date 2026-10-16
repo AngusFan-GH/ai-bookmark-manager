@@ -58,6 +58,7 @@ const DEFAULT_STATE: SyncState = {
 
 export class SyncCoordinator {
   private inflight: Promise<SyncResult> | null = null;
+  private pendingReason: SyncReason | null = null;
   constructor(private readonly deps: SyncDeps) {}
 
   /**
@@ -65,9 +66,25 @@ export class SyncCoordinator {
    * that same promise (dev guide § 2.1: single background writer).
    */
   fullSync(reason: SyncReason = 'event'): Promise<SyncResult> {
-    if (this.inflight) return this.inflight;
-    this.inflight = this.runFull(reason).finally(() => { this.inflight = null; });
+    if (this.inflight) {
+      this.pendingReason = reason;
+      return this.inflight;
+    }
+    this.inflight = this.drain(reason);
     return this.inflight;
+  }
+
+  private async drain(reason: SyncReason): Promise<SyncResult> {
+    for (;;) {
+      this.pendingReason = null;
+      try {
+        const result = await this.runFull(reason);
+        if (this.pendingReason === null) { this.inflight = null; return result; }
+      } catch (error) {
+        if (this.pendingReason === null) { this.inflight = null; throw error; }
+      }
+      reason = this.pendingReason;
+    }
   }
 
   private async runFull(reason: SyncReason): Promise<SyncResult> {

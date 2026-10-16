@@ -10,7 +10,9 @@
 // abandons the in-progress plan (it stays in Dexie as 'draft' and
 // can be inspected via the store / dev tools, but is not auto-run).
 
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
+import { exportPlanBackup } from '../../../src/workspace-client';
+import { downloadableJson } from '../workspace-helpers';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { useBookmarkStore } from '../../../src/store';
 import type {
@@ -40,6 +42,15 @@ const plan = ref<(OperationPlan & { steps: OperationStep[] }) | null>(null);
 
 // Step 3: approval + execution
 const approval = ref<ApprovalToken | null>(null);
+const backupDownloaded = ref(false);
+const backupConfirmed = ref(false);
+watch(plan,()=>{approval.value=null;backupDownloaded.value=false;backupConfirmed.value=false;},{deep:true});
+async function downloadBackup() {
+  if(!plan.value||loading.value)return;loading.value=true;
+  try {const data=await exportPlanBackup(plan.value.id);const url=URL.createObjectURL(downloadableJson(data));const a=document.createElement('a');a.href=url;a.download=`bookmark-import-backup-${plan.value.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);backupDownloaded.value=true;}
+  catch(e){ElMessage.error('备份导出失败: '+(e instanceof Error?e.message:String(e)));}
+  finally{loading.value=false;}
+}
 const executing = ref(false);
 const result = ref<ExecuteResultMsg | null>(null);
 
@@ -126,7 +137,7 @@ const highRiskCount = computed(() =>
 );
 
 async function approvePlan() {
-  if (!plan.value) return;
+  if (!plan.value || !backupDownloaded.value || !backupConfirmed.value || loading.value) return;
   if (highRiskCount.value > 0) {
     try {
       await ElMessageBox.confirm(
@@ -205,6 +216,8 @@ defineExpose({ open: openModal });
       width="780"
       :close-on-click-modal="false"
       :show-close="!loading && !executing"
+      :close-on-press-escape="!loading && !executing"
+      append-to-body
       align-center
       @closed="reset"
     >
@@ -281,13 +294,14 @@ defineExpose({ open: openModal });
             :title="`包含 ${highRiskCount} 个高风险步骤（删除）。点击批准时会要求再次确认。`"
           />
         </el-card>
+        <div class="backup-review"><el-button :loading="loading" @click="downloadBackup">导出此计划的恢复备份</el-button><el-checkbox v-model="backupConfirmed" :disabled="!backupDownloaded || loading">我已保存备份，并核对以上所有更改</el-checkbox></div>
       </div>
 
       <!-- Step 3: Approve + execute -->
       <div v-else-if="step === 'execute' && plan" class="step-pane">
         <p class="muted">点击"执行"会立即按上面的步骤操作浏览器书签。批准令牌（一次性，5 分钟内有效）已签发。如不希望执行可关闭此对话框。</p>
         <el-card shadow="never" class="exec-card">
-          <div><b>令牌</b>: <code class="muted small">{{ approval?.token?.slice(0, 16) }}…</code></div>
+          <div>已批准当前计划，执行权限一次性有效。</div>
           <div><b>过期时间</b>: {{ approval ? new Date(approval.expiresAt).toLocaleString() : '—' }}</div>
           <div><b>计划</b>: {{ plan.id }}</div>
         </el-card>
@@ -307,7 +321,7 @@ defineExpose({ open: openModal });
           <el-button v-if="step === 'plan' || step === 'execute'" @click="back" :disabled="loading || executing">上一步</el-button>
           <el-button v-if="step === 'preview'" :disabled="!rawJson" @click="runPreview" :loading="loading">刷新预览</el-button>
           <el-button v-if="step === 'preview'" :disabled="!preview" type="primary" @click="createPlan" :loading="loading">创建计划</el-button>
-          <el-button v-if="step === 'plan'" type="primary" @click="approvePlan" :loading="loading">批准</el-button>
+          <el-button v-if="step === 'plan'" :disabled="!backupDownloaded || !backupConfirmed" type="primary" @click="approvePlan" :loading="loading">批准</el-button>
           <el-button v-if="step === 'execute'" type="primary" @click="runExecute" :loading="executing">执行</el-button>
           <el-button v-if="step === 'done'" @click="closeModal">关闭</el-button>
         </div>
@@ -317,6 +331,7 @@ defineExpose({ open: openModal });
 </template>
 
 <style scoped>
+.backup-review { display:flex; flex-direction:column; gap:12px; align-items:flex-start; margin-top:16px; }
 .muted { color: #8490a3; }
 .small { font-size: 12px; }
 .row { display: flex; align-items: center; gap: 12px; margin: 12px 0; }

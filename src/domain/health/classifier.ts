@@ -14,15 +14,15 @@
 //   - 5xx and network errors ⇒ network_error (retryable)
 //
 // We do NOT make the "first hit → confirmed_dead" transition here.
-// The classifier returns suspected_dead for a single 404/410; the
-// scheduler is responsible for retries and the suspected→confirmed
-// promotion. The classifier is deliberately conservative.
+// The classifier returns suspected_dead for a single 404/410. The
+// scheduler supplies explicit prior 404/410 evidence for promotion;
+// unrelated retries never count. The classifier is conservative.
 
 import type { HealthInputs, HealthClassification, HealthCheckOutcome } from './types';
 
 export function classify(inputs: HealthInputs): HealthClassification {
-  const code = typeof inputs.httpCode === 'number' ? inputs.httpCode : null;
-  const attempts = inputs.attempts ?? 0;
+  const code = typeof inputs.httpCode === 'number' && inputs.httpCode > 0 ? inputs.httpCode : null;
+  const priorDeadResponses = inputs.priorDeadResponses ?? 0;
 
   // 1. Network error path: no httpCode at all.
   if (code === null) {
@@ -66,7 +66,7 @@ export function classify(inputs: HealthInputs): HealthClassification {
 
   // 7. 404 / 410
   if (code === 404 || code === 410) {
-    if (attempts >= 1) {
+    if (priorDeadResponses >= 1) {
       return { status: 'confirmed_dead', reason: `${code} ${statusText(code)} after retry` };
     }
     return { status: 'suspected_dead', reason: `${code} ${statusText(code)}` };

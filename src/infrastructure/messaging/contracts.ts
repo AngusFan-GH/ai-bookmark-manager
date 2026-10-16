@@ -197,6 +197,7 @@ export interface HealthStatusSummary {
 }
 
 export type BackgroundRequest =
+  | import('../../workspace-client').WorkspaceRequest
   | BookmarkListRequest
   | BookmarkTreeRequest
   | StatsRequest

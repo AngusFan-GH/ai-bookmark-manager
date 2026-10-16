@@ -29,6 +29,7 @@ export async function hashApprovedPlan(plan: OperationPlan): Promise<string> {
         action: step.action,
         targetBrowserId: step.targetBrowserId,
         parentBrowserId: step.parentBrowserId,
+        parentStepId: step.parentStepId,
         expectedBefore: step.expectedBefore,
         desiredAfter: step.desiredAfter,
         riskLevel: step.riskLevel,

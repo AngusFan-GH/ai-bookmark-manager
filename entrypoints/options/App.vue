@@ -1,174 +1,82 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
-import { ElMessage } from 'element-plus';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useBookmarkStore } from '../../src/store';
-import { request } from '../../src/client';
-import type { BookmarkRecord, FolderRecord } from '../../src/domain/bookmarks/types';
-import type { LinkCheckRecord, LinkStatus } from '../../src/domain/health/types';
-import ImportFlow from './components/ImportFlow.vue';
-import HealthView from './components/HealthView.vue';
-
-type TabName = 'bookmarks' | 'health';
-const VALID_TABS: TabName[] = ['bookmarks', 'health'];
-
+import * as workspace from '../../src/workspace-client';
+import type { BookmarkRecord } from '../../src/domain/bookmarks/types';
+import type { OperationPlan } from '../../src/domain/operations/types';
+import type { AssistantMode } from '../../src/domain/assistant/types';
+import { buildFolderTree, safeBookmarkHref, initialSearch, downloadableJson, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel } from './workspace-helpers';
+import LegacyTools from './LegacyTools.vue';
+type SessionView = workspace.AssistantSessionView;
 const store = useBookmarkStore();
-const query = ref('');
-const folderId = ref('');
-const page = ref(1);
-const syncing = ref(false);
-const activeTab = ref<TabName>('bookmarks');
-type BookmarkHealth = Pick<LinkCheckRecord, 'bookmarkId' | 'status' | 'checkedAt' | 'httpCode' | 'evidence'>;
-const healthByBookmark = ref<Map<string, BookmarkHealth>>(new Map());
-let debounce: ReturnType<typeof setTimeout> | undefined;
-const folders = computed(() =>
-  store.folders
-    .filter((x: FolderRecord) => x.title && x.id !== '0')
-    .sort((a: FolderRecord, b: FolderRecord) => a.path.localeCompare(b.path) || a.title.localeCompare(b.title)),
-);
-let reqSeq = 0;
-const reqId = (): string => `r${Date.now().toString(36)}_${(++reqSeq).toString(36)}`;
-
-/**
- * Open the page at chrome-extension://<id>/options.html#health and
- * the link health tab is selected on mount and stays in sync with
- * the URL hash. This lets the user bookmark or link to a specific
- * view, and lets commands / context-menu entries navigate to it.
- */
-function tabFromHash(): TabName {
-  const raw = (typeof window !== 'undefined' ? window.location.hash : '').replace(/^#/, '').toLowerCase();
-  return (VALID_TABS as string[]).includes(raw) ? (raw as TabName) : 'bookmarks';
-}
-function syncHash() {
-  if (typeof window === 'undefined') return;
-  const target = `#${activeTab.value}`;
-  if (window.location.hash !== target) {
-    // Use replaceState to avoid spamming browser history with every
-    // tab switch — only the first navigation should be in history.
-    window.history.replaceState(null, '', `${window.location.pathname}${target}`);
-  }
-}
-
-async function refresh() {
-  await store.load(query.value, folderId.value || undefined, (page.value - 1) * 200);
-  await refreshHealthBadges();
-}
-
-const healthLabels: Record<LinkStatus, string> = {
-  unchecked: '未检测', checking: '检测中', outdated: '结果已过期', healthy: '健康',
-  redirected: '已重定向', redirect_pending: '跳转待确认', auth_required: '需登录',
-  forbidden: '访问受限', rate_limited: '限流', suspected_dead: '疑似失效',
-  confirmed_dead: '已确认失效', network_error: '暂时不可验证', unsupported: '安全策略跳过',
-  permission_required: '需要权限',
-};
-const healthTagTypes: Record<LinkStatus, 'success' | 'warning' | 'danger' | 'info'> = {
-  unchecked: 'info', checking: 'warning', outdated: 'info', healthy: 'success', redirected: 'success',
-  redirect_pending: 'warning', auth_required: 'warning', forbidden: 'warning', rate_limited: 'warning',
-  suspected_dead: 'warning', confirmed_dead: 'danger', network_error: 'warning', unsupported: 'info', permission_required: 'info',
-};
-async function refreshHealthBadges(rows?: Array<Pick<LinkCheckRecord, 'bookmarkId' | 'status' | 'checkedAt' | 'httpCode' | 'evidence'>>) {
-  try {
-    const source = rows ?? (await store.healthList()).rows;
-    healthByBookmark.value = new Map(source.map((row) => [row.bookmarkId, row]));
-  } catch {
-    // Bookmark browsing must remain available if the health cache is absent.
-  }
-}
-function healthBadge(row: BookmarkRecord): BookmarkHealth | null {
-  if (!row.url) return null;
-  const health = healthByBookmark.value.get(row.id);
-  return health && health.status !== 'unchecked' ? health : null;
-}
-function healthTooltip(health: BookmarkHealth): string {
-  const bits = [healthLabels[health.status]];
-  if (health.httpCode) bits.push(`HTTP ${health.httpCode}`);
-  if (health.evidence.length) bits.push(health.evidence.join('；'));
-  return bits.join(' · ');
-}
-watch([query, folderId], () => { page.value = 1; if (debounce) clearTimeout(debounce); debounce = setTimeout(() => void refresh(), 200); });
-watch(page, () => void refresh());
-watch(activeTab, (tab) => {
-  syncHash();
-  if (tab === 'bookmarks') void refreshHealthBadges();
-});
-async function sync() {
-  syncing.value = true;
-  try { await store.sync(); page.value = 1; folderId.value = ''; query.value = ''; ElMessage.success('同步完成'); }
-  catch (e) { ElMessage.error(String(e)); }
-  finally { syncing.value = false; }
-}
-async function backup() {
-  try {
-    const data = await request<unknown>({ type: 'EXPORT', requestId: reqId() });
-    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
-    const a = document.createElement('a'); a.href = url;
-    a.download = `bookmarks-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click(); setTimeout(() => URL.revokeObjectURL(url), 5000);
-    ElMessage.success('备份已导出');
-  } catch (e) { ElMessage.error(String(e)); }
-}
-onMounted(async () => {
-  // Honor the URL hash on first paint so deep links open the right
-  // tab. The hash listener below keeps it in sync after that.
-  activeTab.value = tabFromHash();
-  syncHash();
-  window.addEventListener('hashchange', () => { activeTab.value = tabFromHash(); });
-  await refresh();
-  if (!store.stats.lastSync) await sync();
-  // Lightweight UI refresh; native browser bookmark changes remain authoritative.
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
-});
+const query = ref(initialSearch(window.location.search)); const folderId = ref(''); const page = ref(1);
+const section = ref<'browse'|'organize'|'history'>('browse'); const chatOpen = ref(true); const toolsOpen = ref(window.location.hash === '#health'); const settingsOpen = ref(false);
+const busy = ref(false); const sending = ref(false); const error = ref(''); const prompt = ref(''); const mode = ref<AssistantMode>('recommend');
+const session = ref<SessionView>(); const sessions = ref<Array<{id:string;title:string}>>([]); const selected = ref<BookmarkRecord[]>([]);
+const settings = ref({ region: 'global' as 'global'|'cn', model: 'MiniMax-M2.5', hasKey: false, consent: false }); const apiKey = ref('');
+const plan = ref<OperationPlan>(); const backedUp = ref(false); const reviewed = ref(false); const deleteConfirmation = ref(''); const applied = ref(false);
+const duplicates = ref<Array<{url:string;bookmarks:BookmarkRecord[]}>>([]); const history = ref<Array<{id:string;title:string;status:string}>>([]);
+const tree = computed(() => buildFolderTree(store.folders));
+const currentFolder = computed(() => store.folders.find(f => f.id === folderId.value)?.title || '全部书签');
+const focusedMessage = ref('');
+const focusedAssistant = computed(() => session.value?.messages.find(m=>m.id===focusedMessage.value) ?? [...(session.value?.messages ?? [])].reverse().find(m=>m.role==='assistant'));
+const references = computed(() => focusedAssistant.value?.references ?? []);
+const moves = computed(() => focusedAssistant.value?.moves ?? []);
+const selectedMoves = ref<string[]>([]);
+watch(focusedAssistant,()=>{selectedMoves.value=moves.value.map(m=>m.bookmarkId);plan.value=undefined;});
+watch(selectedMoves,()=>{plan.value=undefined;});
+function moveDestination(id:string) {const proposed=focusedAssistant.value?.folders?.find(f=>f.proposalId===id);if(proposed){const parent=store.folders.find(f=>f.id===proposed.parentFolderId);return `${parent?.path ? parent.path+' / ' : ''}${parent?.title||'目录'} / ${proposed.title}（新建）`;}const folder=store.folders.find(f=>f.id===id);return folder?`${folder.path ? folder.path+' / ':''}${folder.title}`:id;}
+function bookmarkTitle(id:string){return store.rows.find(b=>b.id===id)?.title||session.value?.citations?.find(c=>c.bookmarkId===id)?.title||`书签 ${id}`;}
+const planCards=computed(()=>(plan.value?.steps??[]).map(step=>({step,view:describePlanStep(step,plan.value?.steps??[],store.folders,[...store.rows,...(session.value?.citations??[]).map(c=>({id:c.bookmarkId,title:c.title,url:c.url,path:c.path}))])})));
+const executionCounts=computed(()=>({succeeded:plan.value?.steps.filter(s=>s.status==='succeeded').length??0,failed:plan.value?.steps.filter(s=>s.status==='failed').length??0,compensated:plan.value?.steps.filter(s=>s.status==='compensated').length??0,skipped:plan.value?.steps.filter(s=>s.status==='skipped').length??0}));
+const hasDeletes = computed(() => plan.value?.steps.some(s => s.action === 'delete') ?? false);
+const canApply = computed(() => canExecuteReviewedPlan({status:plan.value?.status,stepCount:plan.value?.steps.length??0,applied:applied.value,backedUp:backedUp.value,reviewed:reviewed.value,hasDeletes:hasDeletes.value,deleteConfirmation:deleteConfirmation.value,busy:busy.value}));
+let timer: ReturnType<typeof setTimeout> | undefined;
+async function run(action:()=>Promise<void>) { error.value=''; busy.value=true; try { await action(); } catch(e) {error.value=e instanceof Error?e.message:String(e);} finally {busy.value=false;} }
+let refreshQueue=Promise.resolve();let refreshVersion=0;
+async function refresh() {const version=++refreshVersion;const args=[query.value,folderId.value||undefined,(page.value-1)*200] as const;refreshQueue=refreshQueue.catch(()=>{}).then(async()=>{if(version===refreshVersion)await store.load(...args);});await refreshQueue;}
+watch([query,folderId],()=>{page.value=1; selected.value=[]; if(timer)clearTimeout(timer); timer=setTimeout(()=>void refresh(),200);});
+watch(page,()=>void refresh());
+watch(plan,()=>{backedUp.value=false;reviewed.value=false;deleteConfirmation.value='';applied.value=false;},{deep:true});
+function pickFolder(node:{id:string}) {folderId.value=node.id;section.value='browse';}
+async function copy(url:string) { try {await navigator.clipboard.writeText(url);ElMessage.success('原始 URL 已复制');}catch{ElMessage.error('无法复制，请从详情中选择原始 URL');} }
+function download(data:unknown,name:string) {const url=URL.createObjectURL(downloadableJson(data));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}
+async function newSession() {await run(async()=>{session.value=await workspace.createSession({mode:mode.value,scope:folderId.value?{folderId:folderId.value}:{}});focusedMessage.value='';sessions.value=await workspace.listSessions();});}
+async function switchSession(id:string) {await run(async()=>{session.value=await workspace.getSession(id);mode.value=session.value.mode;focusedMessage.value='';});}
+async function send() {if(!prompt.value.trim()||sending.value)return; error.value='';sending.value=true;const text=prompt.value.trim();try {if(!session.value)session.value=await workspace.createSession({mode:mode.value,scope:folderId.value?{folderId:folderId.value}:{}});const id=session.value.id; session.value=await workspace.sendTurn(id,text);prompt.value='';focusedMessage.value='';sessions.value=await workspace.listSessions();}catch(e){error.value=e instanceof Error?e.message:String(e);}finally{sending.value=false;}}
+async function cancel() {if(session.value)await run(async()=>{await workspace.cancelTurn(session.value!.id);});}
+async function saveSettings() {await run(async()=>{if(settings.value.consent){const granted=await chrome.permissions.request({origins:[settings.value.region==='cn'?'https://api.minimax.cn/*':'https://api.minimax.io/*']});if(!granted)throw new Error('未授予所选 MiniMax 服务的网络权限，设置未保存。');}await workspace.saveAssistantSettings({region:settings.value.region,model:settings.value.model,consent:settings.value.consent,...(apiKey.value?{apiKey:apiKey.value}:{})});apiKey.value='';settings.value=await workspace.getAssistantSettings();settingsOpen.value=false;ElMessage.success('设置已保存，密钥仅保留在当前浏览器会话');});}
+async function prepareMoves() {await run(async()=>{const steps=organizationSteps(moves.value,focusedAssistant.value?.folders??[],selectedMoves.value);plan.value=await workspace.prepareOrganization({title:'AI 目录整理建议',steps});section.value='organize';});}
+async function prepareDelete() {await run(async()=>{plan.value=await workspace.prepareOrganization({title:'删除选中的书签',steps:selected.value.filter(b=>b.kind==='bookmark').map(b=>({action:'delete' as const,targetBrowserId:b.browserId,reason:'用户在工作台明确选择'}))});section.value='organize';});}
+async function backupPlan() {await run(async()=>{if(!plan.value)return;const data=await workspace.exportPlanBackup(plan.value.id);download(data,`bookmark-plan-${plan.value.id}.json`);backedUp.value=true;});}
+async function applyPlan() {if(!canApply.value||!plan.value)return;await run(async()=>{const id=plan.value!.id;const approval=await store.approve(id);const result=await store.execute(id,approval.token);applied.value=true;reviewed.value=false;await refresh();plan.value=await store.getPlan(id);ElMessage.info(`执行结果：${planStatusLabel(result.status)}。${result.succeeded} 项成功，${result.failed} 项失败，${result.compensated} 项已补偿。请在历史中查看各步骤。`);});}
+async function openHistory() {section.value='history';await run(async()=>{history.value=(await workspace.listHistory()).map(item=>({...item,id:item.planId}));});}
+async function extractContent() {try {await ElMessageBox.confirm(`将访问选中的 ${selected.value.length} 个书签网页，提取有长度限制的文本。不会读取登录信息；网站将收到网络请求。是否继续？`,'读取书签内容',{confirmButtonText:'读取所选页面',cancelButtonText:'取消',type:'warning'});}catch{return;} await run(async()=>{const origins=selectedOrigins(selected.value.map(b=>b.url));if(!origins.length)throw new Error('所选书签中没有可读取的 HTTP(S) 地址。');const granted=await chrome.permissions.request({origins});if(!granted)throw new Error('未授予所选网站的访问权限，未读取页面。');const result=await workspace.fetchContent(selected.value.map(b=>b.id));ElMessage.info(result.results.map(r=>`${r.bookmarkId}: ${r.status}${r.reason?' · '+r.reason:''}`).join('；'));});}
+function visibility(){if(!document.hidden)void refresh();}
+function hashChange(){if(window.location.hash==='#health')toolsOpen.value=true;}
+watch(toolsOpen,open=>{if(!open)void refresh();});
+onMounted(async()=>{await refresh();if(!store.stats.lastSync)await run(async()=>{await store.sync();await refresh();});await run(async()=>{settings.value=await workspace.getAssistantSettings();sessions.value=await workspace.listSessions();});document.addEventListener('visibilitychange',visibility);window.addEventListener('hashchange',hashChange);});
+onUnmounted(()=>{if(timer)clearTimeout(timer);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('hashchange',hashChange);});
 </script>
 <template>
-  <div class="shell">
-    <header><div><h1>AI Bookmark Manager</h1><p>本地优先 · 书签管理工作台</p></div>
-      <div class="actions">
-        <el-button :loading="syncing" @click="sync">重新同步</el-button>
-        <el-button @click="backup">导出 JSON 备份</el-button>
-        <ImportFlow />
-        <!-- 链接健康 tab switcher: 始终可见；处于健康 tab 时高亮 (primary) -->
-        <el-button
-          data-testid="link-health-button"
-          :type="activeTab === 'health' ? 'primary' : 'warning'"
-          round
-          @click="activeTab = 'health'"
-        >
-          <span style="margin-right: 4px">🩺</span>链接健康
-        </el-button>
-      </div>
-    </header>
-    <div class="stats">
-      <el-card shadow="never"><div class="number">{{ store.stats.bookmarks }}</div><span>书签总数</span></el-card>
-      <el-card shadow="never"><div class="number">{{ store.stats.folders }}</div><span>目录节点</span></el-card>
-      <el-card shadow="never"><div class="date">{{ store.stats.lastSync ? new Date(store.stats.lastSync).toLocaleString() : '尚未同步' }}</div><span>最近同步</span></el-card>
-    </div>
-    <el-tabs v-model="activeTab">
-      <el-tab-pane label="书签" name="bookmarks">
-        <el-card shadow="never" class="main">
-          <div class="toolbar"><el-input v-model="query" clearable placeholder="搜索标题、URL、目录路径" style="max-width:420px"/>
-            <el-select v-model="folderId" filterable style="width:300px" placeholder="选择目录"><el-option label="全部目录" value=""/><el-option v-for="f in folders" :key="f.id" :value="f.id" :label="`${f.path ? f.path + ' / ' : ''}${f.title}`"/></el-select>
-          </div>
-          <el-alert v-if="store.error" :title="store.error" type="error" show-icon :closable="false"/>
-          <el-table :data="store.rows" v-loading="store.loading" stripe height="min(60vh,650px)" row-key="id">
-            <el-table-column label="标题" min-width="290"><template #default="{row}"><span class="kind">{{ row.kind === 'folder' ? '📁' : '🔖' }}</span>{{ row.title || '(无标题)' }}
-              <el-tooltip v-if="healthBadge(row)" :content="healthTooltip(healthBadge(row)!)" placement="top" :show-after="250">
-                <el-tag :type="healthTagTypes[healthBadge(row)!.status]" size="small" effect="plain" class="health-badge">{{ healthLabels[healthBadge(row)!.status] }}</el-tag>
-              </el-tooltip>
-            </template></el-table-column>
-            <el-table-column prop="path" label="目录路径" min-width="220" show-overflow-tooltip/>
-            <el-table-column label="URL" min-width="300" show-overflow-tooltip><template #default="{row}"><a v-if="row.url && /^https?:\/\//i.test(row.url)" :href="row.url" target="_blank" rel="noopener noreferrer">{{ row.url }}</a><span v-else>{{ row.url || '—' }}</span></template></el-table-column>
-            <el-table-column label="添加时间" width="175"><template #default="{row}">{{ row.dateAdded ? new Date(row.dateAdded).toLocaleString() : '—' }}</template></el-table-column>
-          </el-table>
-          <div class="footer"><span>共 {{ store.total }} 条（每页 200 条）</span><el-pagination v-model:current-page="page" :page-size="200" layout="prev, pager, next" :total="store.total"/></div>
-        </el-card>
-        <p class="notice">导入 JSON 备份是受控操作：仅在批准后才写入浏览器。删除操作会要求二次确认。所有写入由 OperationExecutor 统一执行并产生审计日志。</p>
-      </el-tab-pane>
-      <el-tab-pane label="链接健康" name="health">
-        <HealthView @updated="refreshHealthBadges" />
-      </el-tab-pane>
-    </el-tabs>
-  </div>
+<div class="workspace" :class="{'chat-collapsed':!chatOpen}">
+<header class="topbar"><div class="brand"><span class="brand-mark">B</span><div><strong>Bookmark Workspace</strong><small>原生书签 · 本地优先</small></div></div><div class="header-actions"><el-button @click="toolsOpen=true">导入 / 导出 / 链接健康</el-button><el-button @click="settingsOpen=true">AI 设置</el-button><el-button :aria-expanded="chatOpen" @click="chatOpen=!chatOpen">{{chatOpen?'收起对话':'打开 AI 对话'}}</el-button></div></header>
+<aside class="sidebar" aria-label="原生书签目录"><div class="sidebar-title">我的书签 <span>{{store.stats.bookmarks}}</span></div><button class="folder-all" :class="{active:!folderId}" @click="folderId='';section='browse'">▤ 全部书签</button><el-tree :data="tree" node-key="id" :current-node-key="folderId" highlight-current :expand-on-click-node="false" :default-expanded-keys="tree.map(node=>node.id)" @node-click="pickFolder"/><el-empty v-if="!tree.length&&!store.loading" description="暂无目录" :image-size="48"/><div class="sidebar-bottom"><p>目录来自浏览器原生书签。AI 建议不会自动修改它们。</p><el-button :loading="busy" @click="run(async()=>{await store.sync();await refresh();})">刷新原生书签</el-button></div></aside>
+<main class="main-pane"><div class="page-heading"><div><p class="eyebrow">YOUR COLLECTION</p><h1>{{currentFolder}}</h1></div><span class="count">{{store.total}} 条记录</span></div><nav class="view-tabs" aria-label="工作台视图"><button :class="{active:section==='browse'}" @click="section='browse'">浏览与引用</button><button :class="{active:section==='organize'}" @click="section='organize'">整理计划 <span v-if="plan">· {{plan.steps.length}}</span></button><button :class="{active:section==='history'}" @click="openHistory">操作历史</button></nav>
+<el-alert v-if="error||store.error" :title="error||store.error" type="error" show-icon :closable="false" class="error"/>
+<template v-if="section==='browse'"><el-input v-model="query" clearable aria-label="搜索原生书签" placeholder="搜索标题、URL 或目录路径…" size="large"/><p v-if="folderId" class="muted">浏览仅显示此目录的直接子项；AI 对话会检索此目录及其子目录。</p><div class="collection-toolbar"><span>{{selected.length?`已选择 ${selected.length} 项`:'选择书签可读取页面内容或预览删除计划'}}</span><el-button size="small" :disabled="!selected.length||busy" @click="extractContent">读取内容</el-button><el-button size="small" :disabled="!selected.length||busy" @click="prepareDelete">预览删除</el-button></div>
+<el-table :data="store.rows" v-loading="store.loading" row-key="id" @selection-change="(rows:BookmarkRecord[])=>selected=rows" empty-text="暂无匹配书签。试试其他关键词，或选择其他目录。"><el-table-column type="selection" width="42" :selectable="(row:BookmarkRecord)=>row.kind==='bookmark'"/><el-table-column label="书签" min-width="240"><template #default="{row}"><a v-if="safeBookmarkHref(row.url)" class="bookmark-title" :href="safeBookmarkHref(row.url)" target="_blank" rel="noopener noreferrer">{{row.title||'未命名书签'}} ↗</a><button v-else-if="row.kind==='folder'" class="folder-link" @click="pickFolder(row)">▸ {{row.title||'未命名目录'}}</button><strong v-else>{{row.title||'未命名书签'}}</strong><div class="bookmark-url">{{row.url||'原生目录'}}</div><div class="bookmark-path">{{row.path||'根目录'}} · ID {{row.id}}</div></template></el-table-column><el-table-column width="94" label="原始地址"><template #default="{row}"><el-button v-if="row.url" text size="small" @click="copy(row.url)">复制 URL</el-button></template></el-table-column></el-table><el-pagination v-model:current-page="page" :page-size="200" :total="store.total" layout="prev, pager, next" class="pagination"/>
+<section v-if="references.length" class="references"><h2>本轮引用 <small>原始书签来源</small></h2><article v-for="r in references" :key="r.citationId" class="reference-card"><span class="reference-id">{{r.citationId}}</span><div><a v-if="safeBookmarkHref(r.url)" :href="safeBookmarkHref(r.url)" target="_blank" rel="noopener noreferrer">{{r.title||r.url}}</a><strong v-else>{{r.title}}</strong><p>{{r.reason}}</p><small>{{r.path}} · 书签 {{r.bookmarkId}}</small><div class="bookmark-url">{{r.url}}</div></div><el-button text @click="copy(r.url)">复制 URL</el-button></article></section></template>
+<template v-else-if="section==='organize'"><div class="intro-card"><h2>先预览，再更改</h2><p>整理只生成建议。每次写入都需要核对完整计划、导出备份并明确批准。</p><el-button :loading="busy" @click="run(async()=>{duplicates=(await workspace.analyzeDuplicates(folderId||undefined)).groups;})">检查完全相同的 URL</el-button><el-button :disabled="!selectedMoves.length||busy" @click="prepareMoves">预览本轮 AI 移动建议</el-button></div><section v-if="moves.length"><h2>选择需要采纳的移动建议</h2><el-checkbox-group v-model="selectedMoves" :disabled="busy"><article v-for="move in moves" :key="move.bookmarkId" class="plan-step"><el-checkbox :value="move.bookmarkId">{{bookmarkTitle(move.bookmarkId)}}</el-checkbox><p>移动至：{{moveDestination(move.targetFolderId)}}</p><p class="muted">{{move.reason}}</p></article></el-checkbox-group></section><section v-if="duplicates.length"><h2>重复 URL · {{duplicates.length}} 组</h2><article v-for="g in duplicates" :key="g.url" class="duplicate-card"><div class="bookmark-url">{{g.url}}</div><p v-for="b in g.bookmarks" :key="b.id">{{b.title}} · {{b.path}} · ID {{b.id}}</p></article><p class="muted">不会自动挑选或删除。返回浏览视图，明确选择需要删除的条目。</p></section>
+<template v-if="plan"><div class="plan-heading"><h2>{{plan.title}}</h2><el-tag>{{planStatusLabel(plan.status)}}</el-tag></div><p class="muted">共 {{plan.steps.length}} 项更改 · 索引版本 {{plan.basedOnGeneration}}</p><el-alert v-if="!['draft','validated','approved'].includes(plan.status)" :title="`执行结果：${executionCounts.succeeded} 项成功，${executionCounts.failed} 项失败，${executionCounts.compensated} 项已补偿，${executionCounts.skipped} 项已跳过`" :type="executionCounts.failed?'warning':'info'" :closable="false"/><article v-for="{step,view} in planCards" :key="step.id" class="plan-step"><div><el-tag :type="step.action==='delete'?'danger':'info'">{{view.action}}</el-tag> <strong>{{step.action==='create'?view.targetTitle:view.sourceTitle}}</strong> · {{view.risk}} <el-tag :type="step.status==='failed'?'danger':step.status==='succeeded'?'success':'info'" size="small">{{stepStatusLabel(step.status)}}</el-tag></div><p>{{step.reason}}</p><el-alert v-if="step.errorMessage" :title="stepErrorLabel(step.errorMessage)" type="warning" :closable="false"/><dl><template v-if="step.action!=='create'"><dt>原目录</dt><dd>{{view.sourcePath}}</dd><dt v-if="view.sourceUrl">原始 URL</dt><dd v-if="view.sourceUrl">{{view.sourceUrl}}</dd></template><template v-if="step.action==='delete'"><dt>更改结果</dt><dd>从浏览器原生书签中删除此条目</dd></template><template v-else><dt>{{step.action==='create'?'新建目录':'目标目录'}}</dt><dd>{{view.targetPath}}</dd><dt v-if="view.targetTitle!==view.sourceTitle&&step.action!=='create'">新标题</dt><dd v-if="view.targetTitle!==view.sourceTitle&&step.action!=='create'">{{view.targetTitle}}</dd><dt v-if="view.targetUrl!==view.sourceUrl">新 URL</dt><dd v-if="view.targetUrl!==view.sourceUrl">{{view.targetUrl}}</dd></template></dl><details class="technical-details"><summary>技术详情</summary><p>书签 ID：{{step.targetBrowserId||'执行时创建'}} · 步骤：{{step.id}}</p><p>更改前：{{JSON.stringify(step.expectedBefore)}}</p><p>更改后：{{JSON.stringify(step.desiredAfter)}}</p></details></article><div class="approval-box"><el-button :loading="busy" :disabled="applied" @click="backupPlan">1. 导出此计划的恢复备份</el-button><p v-if="backedUp" role="status">备份已发起下载。请确认文件已保存后批准。</p><el-checkbox v-model="reviewed" :disabled="!backedUp||applied">2. 已保存备份，逐项核对并批准以上更改</el-checkbox><label v-if="hasDeletes">删除需要再次确认：输入“删除”<el-input v-model="deleteConfirmation" placeholder="删除" :disabled="applied"/></label><el-button type="primary" :disabled="!canApply" :loading="busy" @click="applyPlan">3. 批准并执行 {{plan.steps.length}} 项更改</el-button><p v-if="applied" role="status">本计划已执行。请查看操作历史；如需重试，请创建并审核新计划。</p></div></template><el-empty v-else description="还没有整理计划。在对话中请求整理建议，或从浏览视图选择书签。" :image-size="80"/></template>
+<template v-else><h2>操作历史</h2><p class="muted">原生书签写入的计划状态与步骤结果。</p><el-empty v-if="!history.length" description="暂无操作记录"/><article v-for="item in history" :key="item.id" class="history-card"><div><strong>{{item.title}}</strong><p>{{item.id}}</p></div><el-tag>{{planStatusLabel(item.status)}}</el-tag><el-button @click="run(async()=>{plan=await store.getPlan(item.id);section='organize';})">查看计划</el-button></article></template>
+</main>
+<aside v-if="chatOpen" class="chat-pane" aria-label="AI 多轮对话"><div class="chat-header"><div><h2>书签助手</h2><small>有来源的推荐，可审核的整理</small></div><el-button text :disabled="sending||busy" @click="newSession">新对话</el-button></div><div class="chat-controls"><el-select v-model="mode" aria-label="新对话模式（点击新对话后生效）" :disabled="sending"><el-option label="推荐与检索" value="recommend"/><el-option label="目录整理" value="organize"/></el-select><el-select :model-value="session?.id" placeholder="历史对话" aria-label="历史对话" :disabled="sending||busy" @change="switchSession"><el-option v-for="s in sessions" :key="s.id" :value="s.id" :label="s.title||s.id"/></el-select></div><p class="scope-label">范围：{{session?.scope.folderId?store.folders.find(f=>f.id===session?.scope.folderId)?.title||session.scope.folderId:session?'全部书签':currentFolder}} · 包含子目录中的书签；新对话固定当前范围。<span v-if="focusedAssistant?.disclosure">当前范围共 {{focusedAssistant.disclosure.totalInScope}} 条，已发送 {{focusedAssistant.disclosure.transmitted}} 条。</span></p><div class="messages" aria-live="polite" :aria-busy="sending"><div v-if="!session?.messages.length" class="chat-empty"><span>✦</span><h3>让收藏真正派上用场</h3><p>“帮我找适合入门 Vue 的资料”<br/>“这些书签可以怎样整理？”</p><p>默认仅使用标题、URL 和目录。只有你明确读取内容后，才可能使用已提取的有限文本。</p></div><article v-for="message in session?.messages" :key="message.id" class="message" :class="message.role"><small>{{message.role==='user'?'你':'书签助手'}}</small><p>{{message.text}}</p><div v-if="message.disclosure" class="disclosure">{{message.disclosure.metadataOnly?'仅元数据':'含有限已提取文本'}} · 已发送 {{message.disclosure.transmitted}} / {{message.disclosure.totalInScope}} 条 · 省略 {{message.disclosure.omitted}} 条</div><button v-if="message.references?.length" class="inline-link" @click="focusedMessage=message.id;section='browse'">查看来源引用（{{message.references.length}}）</button><button v-if="message.moves?.length" class="inline-link" @click="focusedMessage=message.id;section='organize'">查看整理建议（{{message.moves.length}}）</button></article><p v-if="sending" class="muted" role="status">正在检索并生成回复…</p></div><form class="composer" @submit.prevent="send"><p v-if="!settings.hasKey||!settings.consent" class="setup-notice">先在 AI 设置中配置当前会话密钥，并确认发送书签数据的范围。</p><el-input v-model="prompt" type="textarea" :rows="3" maxlength="8000" resize="none" aria-label="给书签助手的消息" placeholder="围绕你的书签继续提问…" :disabled="sending"/><div class="compose-actions"><el-button v-if="sending" @click="cancel">取消生成</el-button><el-button v-else text @click="settingsOpen=true">{{settings.region==='cn'?'中国区':'全球区'}} · {{settings.model}}</el-button><el-button type="primary" native-type="submit" :loading="sending" :disabled="!prompt.trim()||!settings.hasKey||!settings.consent||busy">发送</el-button></div></form></aside>
+<el-dialog v-model="toolsOpen" title="书签工具" width="94%" destroy-on-close><LegacyTools/></el-dialog>
+<el-dialog v-model="settingsOpen" title="AI 连接与数据范围" width="min(560px,94vw)" @closed="apiKey='';run(async()=>{settings=await workspace.getAssistantSettings();})" :close-on-click-modal="false"><el-form label-position="top"><el-form-item label="MiniMax 服务区域"><el-select v-model="settings.region"><el-option label="全球区 · api.minimax.io" value="global"/><el-option label="中国区 · api.minimax.cn" value="cn"/></el-select></el-form-item><el-form-item label="模型"><el-input v-model="settings.model"/></el-form-item><el-form-item label="API Key（仅当前浏览器会话）"><el-input v-model="apiKey" type="password" autocomplete="off" placeholder="输入新密钥；留空保留现有密钥"/></el-form-item><p>密钥不会写入备份、历史记录或日志。关闭浏览器会话后需要重新配置。</p><el-checkbox v-model="settings.consent" class="consent">我同意将当前对话范围内选中的候选书签标题、原始 URL、目录路径及已提取的有限文本发送至以上 MiniMax 服务，用于回答问题或生成整理建议。</el-checkbox></el-form><template #footer><el-button :disabled="busy" @click="run(async()=>{await workspace.clearAssistantKey();apiKey='';settings=await workspace.getAssistantSettings();})">清除密钥</el-button><el-button @click="settingsOpen=false">取消</el-button><el-button type="primary" :loading="busy" @click="saveSettings">保存设置</el-button></template></el-dialog>
+</div>
 </template>
 <style scoped>
-:global(body){margin:0;background:#f5f7fb;color:#263044;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
-.shell{max-width:1500px;margin:auto;padding:28px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:25px;margin:0 0 5px}header p{margin:0;color:#8490a3}.actions{display:flex;gap:8px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}.number{font-size:32px;font-weight:700;margin-bottom:8px}.date{font-size:19px;font-weight:600;margin:9px 0 12px}.stats span{color:#8490a3}.toolbar{display:flex;gap:12px;margin-bottom:18px}.kind{margin-right:8px}.health-badge{margin-left:8px;vertical-align:middle}a{color:#2563eb;text-decoration:none}.footer{display:flex;align-items:center;justify-content:space-between;margin-top:16px;color:#8490a3}.notice{font-size:12px;color:#8490a3;margin-top:15px}@media(max-width:800px){.shell{padding:12px}header{align-items:start;gap:14px;flex-direction:column}.stats{grid-template-columns:1fr}.toolbar{flex-direction:column}}
+:global(body){margin:0;background:#f6f7f9;color:#253247;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif}:global(*){box-sizing:border-box}button,a{touch-action:manipulation}button:focus-visible,a:focus-visible{outline:2px solid #426ae8;outline-offset:3px}.workspace{display:grid;grid-template-columns:230px minmax(390px,1fr) 365px;grid-template-rows:76px minmax(0,1fr);height:100vh}.workspace.chat-collapsed{grid-template-columns:230px minmax(390px,1fr)}.topbar{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;padding:0 24px;background:#fff;border-bottom:1px solid #e6e9f0;gap:20px}.brand{display:flex;align-items:center;gap:12px}.brand-mark{background:#415ddd;border-radius:12px;color:white;font-size:23px;font-weight:700;padding:8px 13px}.brand strong{font-size:17px}.brand small{display:block;font-size:11px;color:#7d8799;margin-top:5px}.header-actions{display:flex;gap:4px}.sidebar{background:#fcfcfd;border-right:1px solid #e6e9f0;display:flex;flex-direction:column;overflow:auto;padding:24px 14px}.sidebar-title{display:flex;justify-content:space-between;font-size:12px;font-weight:600;color:#7c879a;padding:0 10px 20px}.folder-all{border:0;text-align:left;background:transparent;padding:12px;border-radius:7px;color:#34425a;margin-bottom:10px;cursor:pointer}.folder-all.active{background:#eaf0ff;color:#355bcd}.sidebar :deep(.el-tree){background:transparent;font-size:13px;overflow:auto;flex-shrink:0}.sidebar :deep(.el-tree-node__content){height:34px;border-radius:5px}.sidebar-bottom{margin-top:auto;padding:28px 10px 0;font-size:11px;line-height:1.8;color:#8a93a4}.main-pane{padding:30px 32px;overflow:auto;min-width:0}.page-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:25px}.eyebrow{color:#96a0b1;font-size:10px;letter-spacing:2px;margin:0 0 8px}h1{font-size:27px;margin:0;font-weight:650}.count{font-size:12px;color:#7d8799}.view-tabs{display:flex;gap:24px;border-bottom:1px solid #e0e5ec;margin-bottom:24px}.view-tabs button{border:0;background:none;color:#8390a3;padding:0 0 14px;cursor:pointer;font-size:13px}.view-tabs button.active{color:#3e60cf;border-bottom:2px solid #4868db}.error{margin-bottom:15px}.collection-toolbar{display:flex;align-items:center;gap:6px;margin:18px 0 10px}.collection-toolbar>span{font-size:11px;color:#8993a3;margin-right:auto}.bookmark-title{font-weight:600;font-size:13px;color:#34425a;text-decoration:none}.bookmark-title:hover{color:#3f63d8}.bookmark-url{font-size:11px;color:#7d8a9f;overflow-wrap:anywhere;line-height:1.6}.bookmark-path{font-size:10px;color:#9aa4b5;margin-top:5px}.folder-link{border:0;background:none;color:#415ddd;cursor:pointer;font:inherit}.pagination{margin:20px 0;justify-content:center}.main-pane :deep(.el-table){--el-table-header-bg-color:#f6f7f9;--el-table-tr-bg-color:#fff;border-radius:8px}.main-pane :deep(.el-table__cell){padding:14px 0}h2{font-size:17px;font-weight:600}h2 small{font-size:11px;color:#929bad;margin-left:8px}.reference-card,.plan-step,.duplicate-card,.history-card{border:1px solid #e3e7ef;border-radius:9px;padding:16px;background:white;margin:12px 0;font-size:12px}.reference-card{display:flex;gap:12px}.reference-card>div{min-width:0;flex:1}.reference-card p{line-height:1.7;color:#66738a}.reference-card small{color:#8c96a7}.reference-card a{color:#3d60cb;text-decoration:none}.reference-id{color:#5771bd;font-size:10px}.intro-card{padding:20px;background:#eef2ff;border-radius:10px;font-size:12px;line-height:1.8}.intro-card h2{margin-top:0}.plan-heading{display:flex;align-items:center;gap:15px}.plan-step dl{display:grid;grid-template-columns:75px 1fr;gap:8px}.plan-step dt{color:#8b95a5}.plan-step dd{margin:0;overflow-wrap:anywhere;line-height:1.7}.technical-details{font-size:10px;color:#8994a8;overflow-wrap:anywhere}.technical-details summary{cursor:pointer}.approval-box{display:flex;flex-direction:column;align-items:flex-start;gap:15px;padding:20px;border:1px solid #d7e0f7;border-radius:10px;background:white;font-size:12px}.approval-box label{max-width:100%}.approval-box :deep(.el-checkbox){height:auto;white-space:normal}.approval-box :deep(.el-checkbox__label){white-space:normal}.approval-box :deep(.el-button){margin:0}.muted{color:#8994a8;font-size:12px;line-height:1.7}.history-card{display:flex;align-items:center;gap:12px}.history-card>div{flex:1}.history-card p{color:#8c96a7;font-size:10px}.chat-pane{border-left:1px solid #e4e8ef;background:white;display:flex;flex-direction:column;min-height:0}.chat-header{display:flex;align-items:center;justify-content:space-between;padding:23px 22px 18px}.chat-header h2{margin:0 0 5px}.chat-header small{font-size:11px;color:#8d98a9}.chat-controls{display:flex;gap:8px;padding:0 20px}.chat-controls>*{width:50%}.scope-label{font-size:10px;line-height:1.6;color:#8793a8;padding:0 20px}.messages{flex:1;overflow:auto;padding:18px 20px}.chat-empty{margin:35px 2px;text-align:center;color:#94a0b1;font-size:12px;line-height:2}.chat-empty>span{font-size:35px;color:#7791e2}.chat-empty h3{font-size:16px;color:#51617a}.message{padding:13px 15px;border-radius:10px;background:#f6f8fc;margin-bottom:16px;font-size:13px;line-height:1.8;overflow-wrap:anywhere}.message.user{background:#edf2ff}.message>small{font-size:10px;color:#8794aa}.message p{white-space:pre-wrap;margin:7px 0}.disclosure{border-top:1px solid #e2e7ef;padding-top:8px;font-size:10px;color:#8e99ac}.inline-link{border:0;background:none;padding:8px 0 0;color:#4665c9;cursor:pointer;display:block}.composer{border-top:1px solid #edf0f5;padding:15px 18px 18px}.compose-actions{display:flex;justify-content:space-between;gap:6px;margin-top:12px}.compose-actions :deep(.el-button){font-size:11px}.setup-notice{font-size:11px;color:#a08242;line-height:1.6}.consent{height:auto;align-items:flex-start}.consent :deep(.el-checkbox__label){white-space:normal;line-height:1.7}.consent :deep(.el-checkbox__input){margin-top:5px}@media(min-width:1600px){.workspace{grid-template-columns:260px minmax(500px,1fr) 420px}.main-pane{padding:36px 50px}}@media(max-width:1100px){.workspace{grid-template-columns:180px minmax(350px,1fr) 310px}.main-pane{padding:24px 20px}.topbar{padding:0 15px}.brand strong{font-size:14px}.header-actions :deep(.el-button){font-size:11px;padding:8px}}@media(max-width:850px){.workspace,.workspace.chat-collapsed{grid-template-columns:160px minmax(0,1fr);height:auto;min-height:100vh;grid-template-rows:auto 1fr}.topbar{padding:14px;flex-wrap:wrap}.sidebar{grid-column:1;grid-row:2}.main-pane{grid-column:2;grid-row:2;overflow:visible;padding:20px 15px}.chat-pane{grid-column:1/-1;min-height:550px;border-top:1px solid #e4e8ef}.messages{max-height:500px}.collection-toolbar{flex-wrap:wrap}.collection-toolbar>span{width:100%;margin-bottom:8px}.view-tabs{gap:14px}.header-actions{flex-wrap:wrap}.workspace h1{font-size:23px}}@media(max-width:520px){.workspace,.workspace.chat-collapsed{display:block}.sidebar{max-height:230px;border-bottom:1px solid #e6e9f0}.sidebar-bottom{display:none}.main-pane{padding:20px 12px}.brand{margin-bottom:6px}}
 </style>

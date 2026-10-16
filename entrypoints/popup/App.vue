@@ -12,6 +12,7 @@ import type { StatsSummary } from '../../src/infrastructure/messaging/contracts'
 
 const count = ref<number | null>(null);
 const error = ref('');
+const query = ref('');
 
 onMounted(async () => {
   try {
@@ -20,7 +21,8 @@ onMounted(async () => {
 });
 
 function open() {
-  void chrome.runtime.openOptionsPage();
+  if (query.value.trim()) void chrome.tabs.create({ url: chrome.runtime.getURL('options.html') + '?q=' + encodeURIComponent(query.value.trim()) });
+  else void chrome.runtime.openOptionsPage();
 }
 </script>
 <template>
@@ -28,7 +30,7 @@ function open() {
     <h3>🔖 AI Bookmark Manager</h3>
     <p v-if="error" class="err">{{ error }}</p>
     <p v-else>已索引书签：{{ count ?? '加载中...' }}</p>
-    <el-button type="primary" style="width:100%" @click="open">打开书签管理中心</el-button>
+    <form @submit.prevent="open"><el-input v-model="query" clearable aria-label="搜索书签" placeholder="搜索书签…" style="margin-bottom:12px"/><el-button type="primary" native-type="submit" style="width:100%">{{ query.trim() ? '在工作台搜索' : '打开书签工作台' }}</el-button></form><p class="hint">推荐、整理与多轮对话在完整工作台中进行。</p>
   </div>
 </template>
 <style scoped>

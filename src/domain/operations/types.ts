@@ -59,6 +59,8 @@ export interface OperationStep {
    * folder that will contain the new node.
    */
   parentBrowserId: string | null;
+  /** Resolve destination from a successful create step, never an imported browser ID. */
+  parentStepId?: string;
   /**
    * Expected state of the target at the moment of execution. The
    * executor re-queries the live tree and compares this snapshot; on

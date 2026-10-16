@@ -41,6 +41,15 @@ export function validatePlan(plan: OperationPlan): void {
     throw new AppErrorImpl('INVALID_REQUEST', 'plan.steps must be an array', false);
   }
   if (plan.steps.length > 0) {
+    for (const step of plan.steps) {
+      if (step.planId !== plan.id) throw new AppErrorImpl('INVALID_REQUEST', 'step belongs to another plan', false);
+      if (step.parentStepId) {
+        const parent = plan.steps.find(s => s.id === step.parentStepId);
+        if (!parent || parent.action !== 'create' || parent.desiredAfter.url !== undefined || !step.dependsOn.includes(parent.id) || parent.order >= step.order) {
+          throw new AppErrorImpl('INVALID_REQUEST', 'invalid created-parent dependency', false);
+        }
+      }
+    }
     validateStepIds(plan.steps);
     validateActionShape(plan.steps);
     validateDependencyGraph(plan.steps);

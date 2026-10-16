@@ -1,3 +1,4 @@
+import { registerWorkspaceHandlers } from '../src/infrastructure/messaging/workspace-handlers';
 // entrypoints/background.ts
 //
 // MV3 service worker. Wires:
@@ -245,7 +246,7 @@ export default defineBackground(() => {
       const r = await planService.execute(planId, token, dryRun ?? false);
       return r as { planId: string; status: string; succeeded: number; failed: number; compensated: number };
     },
-    listPlans: () => planService.listPlans() as unknown as Promise<unknown[]>,
+    listPlans: async () => (await planService.listPlans()).sort((a,b) => b.createdAt-a.createdAt).map(p => ({planId:p.id,status:p.status,title:p.title,stepCount:p.steps.length,createdAt:p.createdAt})),
     getPlan: async (planId: string) => {
       const [plan, steps] = await Promise.all([
         planService.getPlan(planId),
@@ -284,7 +285,7 @@ export default defineBackground(() => {
     .register('EXPORT', () => deps.exportBackup())
     .register('SYNC_STATE', () => deps.readSyncState())
     .register('IMPORT_PREVIEW', (req) => deps.previewImport(req.rawJson, req.mode))
-    .register('PLAN_DRAFT', (req) => deps.draftPlan(req.rawJson, req.mode))
+    .register('PLAN_DRAFT', (req) => deps.draftPlan(req.rawJson, req.mode, req.title))
     .register('PLAN_LIST', () => deps.listPlans())
     .register('PLAN_GET', (req) => deps.getPlan(req.planId))
     .register('APPROVE', (req) => deps.approvePlan(req.planId, req.ttlMs))
@@ -352,6 +353,7 @@ export default defineBackground(() => {
         return a;
       },
     },
+    captureLocalIndex: async () => ({bookmarks: await db.bookmarks.toArray(), folders: await db.folders.toArray()}),
     currentSyncGeneration: () => getCurrentGeneration(),
     newId,
     now: () => Date.now(),
@@ -376,12 +378,16 @@ export default defineBackground(() => {
     fetch: async (req) => {
       // Real browser fetch. AbortSignal is honored. Response body is
       // capped at req.maxResponseBytes.
+      if (req.signal?.aborted) throw new DOMException('Request aborted', 'AbortError');
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), req.timeoutMs);
-      if (req.signal) req.signal.addEventListener('abort', () => ac.abort(), { once: true });
+      const onAbort = () => ac.abort();
+      req.signal?.addEventListener('abort', onAbort, { once: true });
       try {
         const res = await fetch(req.url, {
           method: req.method,
+          credentials: 'omit',
+          cache: 'no-store',
           // Never allow the browser to silently follow a redirect to a host
           // that has not gone through our static guard and permission check.
           redirect: 'manual',
@@ -401,7 +407,7 @@ export default defineBackground(() => {
             if (done) break;
             if (value) {
               received += value.byteLength;
-              if (received > req.maxResponseBytes) { reader.cancel(); break; }
+              if (received > req.maxResponseBytes) { await reader.cancel().catch(() => undefined); break; }
               chunks.push(value);
             }
           }
@@ -416,6 +422,7 @@ export default defineBackground(() => {
         };
       } finally {
         clearTimeout(t);
+        req.signal?.removeEventListener('abort', onAbort);
       }
     },
     config: {
@@ -441,11 +448,13 @@ export default defineBackground(() => {
     isPaused: () => healthPaused,
   });
 
+  registerWorkspaceHandlers(router, { db, planService, canFetch: containsHealthPermission });
+
   // ---- Message handler --------------------------------------------------
   // Reject messages from other extensions.
   chrome.runtime.onMessage.addListener(
     (request: BackgroundRequest, sender, sendResponse: (r: BackgroundResponse<unknown>) => void) => {
-      if (sender.id !== chrome.runtime.id) {
+      if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) {
         sendResponse(ok('?', null)); // ignore, but still respond
         return false;
       }

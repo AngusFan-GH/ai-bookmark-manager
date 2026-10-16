@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local-first Chrome/Edge bookmark indexing extension (read-only for native bookmarks).",
+  "description": "Local-first bookmark workspace with approved native organization, backups and MiniMax multi-turn reference search.",
   "scripts": {
     "postinstall": "wxt prepare",
     "dev": "wxt prepare && wxt",
@@ -15,12 +15,14 @@
     "typecheck": "wxt prepare && vue-tsc --noEmit -p tsconfig.json",
     "test": "wxt prepare && vitest run",
     "lint": "eslint . --ext .ts,.vue",
-    "lint:fix": "eslint . --ext .ts,.vue --fix"
+    "lint:fix": "eslint . --ext .ts,.vue --fix",
+    "test:browser": "node tests/e2e/browser-smoke.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
     "dexie": "^4.0.11",
     "element-plus": "^2.9.5",
+    "htmlparser2": "^12.0.0",
     "pinia": "^3.0.1",
     "vue": "^3.5.13"
   },
@@ -34,6 +36,7 @@
     "eslint-plugin-vue": "^10.11.1",
     "fake-indexeddb": "^6.2.5",
     "happy-dom": "^15.11.7",
+    "playwright": "^1.62.1",
     "typescript": "^5.8.2",
     "vite": "^6.2.1",
     "vitest": "^3.0.8",

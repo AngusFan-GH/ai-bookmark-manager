@@ -79,9 +79,12 @@ export interface HealthInputs {
    */
   redirectCount?: number;
   /**
-   * The number of retries already attempted for this check.
+   * The number of retries already attempted for this check. Diagnostic
+   * only: retries are not evidence that a bookmark is dead.
    */
   attempts?: number;
+  /** Previous independent probes that returned 404/410, excluding network failures. */
+  priorDeadResponses?: number;
   /**
    * If the server returned a Retry-After header (in seconds), the
    * classifier may surface it for the scheduler.

@@ -42,13 +42,13 @@ describe('classify — 4xx', () => {
     expect(classify({ httpCode: 404, attempts: 0 }).status).toBe('suspected_dead');
   });
   it('confirmed_dead for 404 after retry', () => {
-    expect(classify({ httpCode: 404, attempts: 1 }).status).toBe('confirmed_dead');
+    expect(classify({ httpCode: 404, priorDeadResponses: 1 }).status).toBe('confirmed_dead');
   });
   it('suspected_dead for first 410', () => {
     expect(classify({ httpCode: 410, attempts: 0 }).status).toBe('suspected_dead');
   });
   it('confirmed_dead for 410 after retry', () => {
-    expect(classify({ httpCode: 410, attempts: 2 }).status).toBe('confirmed_dead');
+    expect(classify({ httpCode: 410, priorDeadResponses: 2 }).status).toBe('confirmed_dead');
   });
 });
 
