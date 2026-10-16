@@ -29,6 +29,7 @@ import { diffImport, type ImportMode, type DiffOp, type FlatNode } from './diff'
 import { validatePlan } from './validator';
 import { OperationExecutor, type ExecutorDeps, type BookmarkApiNode } from './executor';
 import { hashApprovedPlan } from './plan-hash';
+import { buildRecoverySteps } from './recovery';
 
 export interface PlanServiceDeps {
   bookmarksApi: ExecutorDeps['bookmarksApi'];
@@ -182,7 +183,7 @@ export class PlanService {
       createdAt: this.deps.now(),
       syncGeneration: basedOnGeneration,
       tree: liveTree,
-      localIndex: { bookmarks: [], folders: [] },
+      localIndex: this.deps.captureLocalIndex ? await this.deps.captureLocalIndex() : { bookmarks: [], folders: [] },
       reason: `before plan execution (mode=${mode})`,
     };
     await this.deps.snapshotsStore.put(snap);
@@ -353,7 +354,7 @@ export class PlanService {
     }
     const planId = this.deps.newId();
     const steps: OperationStep[] = [];
-    const seen = new Set<string>();
+    const priorTargets = new Map<string, OperationStep>();
     for (const [order, request] of input.steps.entries()) {
       if (!['create', 'update', 'rename', 'move', 'delete'].includes(request.action)) throw new AppErrorImpl('INVALID_REQUEST', 'invalid organization action', false);
       const desiredAfter: Record<string, unknown> = {};
@@ -367,7 +368,7 @@ export class PlanService {
       if (request.action === 'update' && !Object.keys(desiredAfter).length) throw new AppErrorImpl('INVALID_REQUEST', 'update requires changes', false);
       let parentStep: OperationStep | undefined;
       if (request.parentStepIndex !== undefined) {
-        if (request.action !== 'move' || request.parentBrowserId !== undefined || !Number.isInteger(request.parentStepIndex) || request.parentStepIndex < 0 || request.parentStepIndex >= order) {
+        if (!['move', 'create'].includes(request.action) || request.parentBrowserId !== undefined || !Number.isInteger(request.parentStepIndex) || request.parentStepIndex < 0 || request.parentStepIndex >= order) {
           throw new AppErrorImpl('INVALID_REQUEST', 'parent step must reference an earlier folder creation', false);
         }
         parentStep = steps[request.parentStepIndex];
@@ -379,13 +380,27 @@ export class PlanService {
       if (request.action === 'delete' && Object.keys(desiredAfter).length) throw new AppErrorImpl('INVALID_REQUEST', 'delete does not accept desired fields', false);
       if (request.action === 'rename' && typeof desiredAfter.title !== 'string') throw new AppErrorImpl('INVALID_REQUEST', 'rename requires title', false);
       let expectedBefore: Record<string, unknown> = {};
+      const previousTargetStep = request.targetBrowserId ? priorTargets.get(request.targetBrowserId) : undefined;
       if (request.action !== 'create') {
-        if (!request.targetBrowserId || seen.has(request.targetBrowserId)) throw new AppErrorImpl('INVALID_REQUEST', 'each target must appear once', false);
+        if (!request.targetBrowserId) throw new AppErrorImpl('INVALID_REQUEST', 'target is required', false);
+        if (previousTargetStep?.action === 'delete' || previousTargetStep?.parentStepId) throw new AppErrorImpl('INVALID_REQUEST', 'cannot edit a deleted target or unresolved moved target in the same plan', false);
         const node = await this.deps.bookmarksApi.get(request.targetBrowserId);
         if (!node.parentId || node.parentId === '0' || node.id === '0') throw new AppErrorImpl('INVALID_REQUEST', 'protected browser folder', false);
-        expectedBefore = expectedState(node); seen.add(node.id);
+        if (request.action === 'update' && desiredAfter.url !== undefined && node.url === undefined) throw new AppErrorImpl('INVALID_REQUEST', 'cannot convert a folder into a bookmark', false);
+        if (request.action === 'delete' && node.url === undefined) {
+          const subtree = await this.deps.bookmarksApi.getSubTree(node.id);
+          const remaining = (subtree[0]?.children ?? []).filter(child => !steps.some(s => s.action === 'delete' && s.targetBrowserId === child.id));
+          if (remaining.length) throw new AppErrorImpl('INVALID_REQUEST', 'folder must be empty; explicitly preview descendant deletions first', false);
+        }
+        expectedBefore = expectedState(node);
+        if (previousTargetStep) {
+          expectedBefore = { ...previousTargetStep.expectedBefore };
+          for (const key of ['title', 'url', 'parentId']) {
+            if (previousTargetStep.desiredAfter[key] !== undefined) expectedBefore[key] = previousTargetStep.desiredAfter[key];
+          }
+        }
       }
-      if (request.action === 'create' || (request.action === 'move' && !parentStep)) {
+      if ((request.action === 'create' || request.action === 'move') && !parentStep) {
         const parent = request.parentBrowserId ? await this.deps.bookmarksApi.get(request.parentBrowserId) : undefined;
         if (!parent || parent.url !== undefined || parent.id === '0') throw new AppErrorImpl('INVALID_REQUEST', 'destination must be a writable folder', false);
         if (request.action === 'move') {
@@ -399,8 +414,9 @@ export class PlanService {
         }
       }
       steps.push({ id: this.deps.newId(), planId, order, action: request.action, targetBrowserId: request.targetBrowserId ?? null,
-        parentBrowserId: request.parentBrowserId ?? null, ...(parentStep ? { parentStepId: parentStep.id } : {}), expectedBefore, desiredAfter, reason: request.reason || 'User-requested organization',
-        riskLevel: request.action === 'delete' ? 'high' : 'medium', dependsOn: parentStep ? [parentStep.id] : [], status: 'pending', inverseOfId: null, errorMessage: null, evidence: ['live browser state at draft'] });
+        parentBrowserId: request.parentBrowserId ?? (parentStep ? 'resolved-at-execution' : null), ...(parentStep ? { parentStepId: parentStep.id } : {}), expectedBefore, desiredAfter, reason: request.reason || 'User-requested organization',
+        riskLevel: request.action === 'delete' ? 'high' : 'medium', dependsOn: [...(parentStep ? [parentStep.id] : []), ...(previousTargetStep ? [previousTargetStep.id] : [])], status: 'pending', inverseOfId: null, errorMessage: null, evidence: ['live browser state at draft'] });
+      if (request.action !== 'create' && request.targetBrowserId) priorTargets.set(request.targetBrowserId, steps[steps.length - 1]);
     }
     const plan: OperationPlan = { id: planId, title: input.title || 'Organize bookmarks', description: 'Review native bookmark changes before approving.',
       createdAt: this.deps.now(), approvedAt: null, basedOnGeneration: this.deps.currentSyncGeneration(), steps, status: 'draft', metadata: { 'plan-service.mode': 'organization' } };
@@ -413,6 +429,60 @@ export class PlanService {
     };
     await this.deps.snapshotsStore.put(snapshot);
     plan.metadata['plan-service.snapshot'] = snapshot.id;
+    await this.deps.plansStore.put(plan);
+    for (const step of steps) await this.deps.stepsStore.put(step);
+    return plan;
+  }
+
+  private recoveryDraftInFlight = new Map<string, Promise<OperationPlan>>();
+
+  /** One recovery attempt per source. Never replay deletes as duplicate creates. */
+  draftRecovery(planId: string): Promise<OperationPlan> {
+    const existing = this.recoveryDraftInFlight.get(planId);
+    if (existing) return existing;
+    const pending = this.createRecoveryDraft(planId).finally(() => this.recoveryDraftInFlight.delete(planId));
+    this.recoveryDraftInFlight.set(planId, pending);
+    return pending;
+  }
+
+  private async createRecoveryDraft(planId: string): Promise<OperationPlan> {
+    const source = await this.deps.plansStore.get(planId);
+    if (!source) throw new AppErrorImpl('BOOKMARK_NOT_FOUND', 'original plan not found', false);
+    if (source.metadata['plan-service.recovery-of']) throw new AppErrorImpl('INVALID_REQUEST', 'recovery plans cannot themselves be recovered automatically', false);
+    const recoveryId = source.metadata['plan-service.recovery-plan'];
+    if (recoveryId) {
+      const existing = await this.deps.plansStore.get(recoveryId);
+      if (existing && ['draft', 'validated', 'approved'].includes(existing.status)) return existing;
+      throw new AppErrorImpl('PLAN_STALE', 'Recovery already attempted; inspect its audit and backup rather than repeat it', false);
+    }
+    if (!['completed', 'partially_completed', 'failed'].includes(source.status)) throw new AppErrorImpl('INVALID_REQUEST', 'only finished operations can be recovered', false);
+    const snapshot = await this.deps.snapshotsStore.get(source.metadata['plan-service.snapshot']);
+    if (!snapshot || snapshot.planId !== source.id || !snapshot.reason.startsWith('immediately before execution')) {
+      throw new AppErrorImpl('PLAN_STALE', 'execution backup is unavailable', false);
+    }
+    const id = this.deps.newId();
+    const liveTree = await this.deps.bookmarksApi.getTree();
+    const steps = buildRecoverySteps(source, snapshot, liveTree, id, () => this.deps.newId());
+    const plan: OperationPlan = {
+      id, title: `Recover: ${source.title}`, description: 'Review inverse changes. Deleted nodes receive new browser IDs; original timestamps cannot be restored. Later unrelated bookmarks are preserved.',
+      createdAt: this.deps.now(), approvedAt: null, basedOnGeneration: this.deps.currentSyncGeneration(),
+      steps, status: 'draft', metadata: { 'plan-service.mode': 'recovery', 'plan-service.recovery-of': source.id },
+    };
+    validatePlan(plan);
+    // Recovery participates in the same downloadable preview-backup contract
+    // as every organization draft. Do not reserve a recovery if capture fails.
+    const previewSnapshot: TreeSnapshot = {
+      id: this.deps.newId(), planId: plan.id, createdAt: this.deps.now(),
+      syncGeneration: plan.basedOnGeneration, tree: liveTree,
+      localIndex: await this.deps.captureLocalIndex?.() ?? { bookmarks: [], folders: [] },
+      reason: `recovery preview for ${plan.id}`,
+    };
+    await this.deps.snapshotsStore.put(previewSnapshot);
+    plan.metadata['plan-service.snapshot'] = previewSnapshot.id;
+    // Reserve before persisting: a storage interruption must block, never create
+    // a second restoration. This marker intentionally survives failed attempts.
+    source.metadata['plan-service.recovery-plan'] = plan.id;
+    await this.deps.plansStore.put(source);
     await this.deps.plansStore.put(plan);
     for (const step of steps) await this.deps.stepsStore.put(step);
     return plan;

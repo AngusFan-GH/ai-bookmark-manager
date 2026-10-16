@@ -1,101 +1,55 @@
 # AI Bookmark Manager
 
-Local-first Chrome/Edge bookmark indexing extension. Native bookmark writes are disabled by default and may only run through the Phase 2 approved `OperationPlan` flow.
+A local-first, task-oriented bookmark assistant for Chrome. Native browser bookmarks remain the source of truth. MiniMax helps find useful saved material, explain recommendations, suggest titles and folders, and prepare changes. AI never directly writes bookmarks.
 
-## Development Stage
+## Current experience (0.2)
 
-This project follows a 7-phase development plan.
+- One goal/search surface; optional directory and history drawers rather than a permanent three-column admin screen.
+- Direct bookmark/folder creation, editing, movement and reviewed deletion. Changing a title and moving the same bookmark is supported as an ordered operation.
+- Popup current-page save, exact-URL local search and optional AI advice; a sidepanel reuses the workspace.
+- Unified multi-turn AI tasks with explicit folder, query or selected-bookmark scope. Original URLs come from stored records, not model prose.
+- Exact-URL duplicate review, selected link rechecks, and safe removal previews.
+- Durable automatic snapshots before writes, optional external export, and separately reviewed targeted recovery with conflict checks.
+- Opt-in local API-key persistence, exclusions and bounded content enhancement. Core local search and manual management work without AI.
 
-- **Phase 0 — Audit & Quality Baseline** ✅ passed ([report](./docs/audit-phase0.md))
-- **Phase 1 — Bookmark data + UI** ✅ passed ([report](./docs/phase-1-report.md), [data model](./docs/data-model.md))
-- **Phase 2 — Backup + safe write executor** ✅ passed ([report](./docs/phase-2-report.md), [security notes](./docs/security.md))
-- **Phase 3 — Link health** 🟡 core flow available; DNS verification and worker-restart recovery remain deferred ([status](./docs/STATUS.md), [implementation notes](./docs/link-health.md))
+See [current behavior and limitations](docs/WORKSPACE_V1.md), [verification](docs/TESTING_WORKSPACE.md), [browser acceptance](tests/e2e/README.md), and [recovery rules](src/domain/operations/RECOVERY.md).
 
-The contract that all subsequent agents follow is in [`docs/DEVELOPMENT_GUIDE.md`](./docs/DEVELOPMENT_GUIDE.md).
+## Run and test
 
-Phase 4 work starts only after the development guide's stop conditions and the Phase 0–3 reports have been reviewed.
+Node 20+ is required; CI uses Node 22.
 
-## Requirements
-
-- Node.js 20+
-- npm 10+ (or pnpm)
-
-## Quick start
-
-```bash
-npm install                  # postinstall will run `wxt prepare`
-npm run dev                  # starts the HMR dev server on http://localhost:3000
+```sh
+npm ci
+npm test
+npm run typecheck
+npm run lint
+npm run build
+npx playwright install --with-deps chromium
+npm run test:browser
 ```
 
-The dev server pre-renders the unpacked extension into `.output/chrome-mv3-dev/`.
+Load `.output/chrome-mv3` as an unpacked extension in an **isolated test profile first**. Successful GitHub Actions runs provide a `bookmark-workspace-chrome` ZIP: extract it and select the directory containing `manifest.json` in Chrome's Load unpacked dialog. Export an external backup before using any new build with important bookmarks.
 
-### Loading the extension into your real Chrome (so it can read your bookmarks)
+Chrome 116+ is the declared minimum because the extension uses the sidepanel API. Automated browser acceptance currently runs Chromium, not a separate Edge or Firefox compatibility matrix. The popup itself is used for quick save/search; "打开侧栏" opens the wider task surface and "展开到完整工作区" opens a normal extension tab.
 
-WXT's `npm run dev` automatically opens a **temporary Chrome window** with a fresh, isolated profile. That window has none of your real bookmarks and is only useful for quick visual checks.
+For development use `npm run dev`. WXT starts a temporary profile; keep that isolation during testing. macOS has convenience scripts `open:chrome-ext` and `open:devdir`; on Windows/Linux open the extensions page/output directory manually.
 
-To develop against your real bookmarks, load the extension into your **normal** Chrome:
+## MiniMax configuration
 
-1. Start the dev server: `npm run dev` — leave it running.
-2. In **your normal Chrome** (the one with all your bookmarks), open `chrome://extensions`.
-3. Toggle **Developer mode** (top-right).
-4. Click **Load unpacked** and select the project’s generated directory:
-   ```
-   <project-root>/.output/chrome-mv3-dev/
-   ```
-5. Pin the extension (puzzle icon → pin) and click its icon → "打开书签管理中心".
+Choose China (`api.minimax.cn`) or global (`api.minimax.io`), a model supported by your account, and enter your own key **in the extension**, never in source, issue text or chat. Saving a key does not prove model connectivity. The default is `MiniMax-M2.5`; output budget is configurable from 1024 to 16384 tokens.
 
-HMR is active. When you save any `.ts` / `.vue` / `.css` file, the dev server pushes a reload signal to the extension. If the page does not refresh, click the **↻ Reload** button on the extension card in `chrome://extensions`.
+Keys default to browser-session storage. Explicit "在此设备记住密钥" uses extension-local storage, not sync storage; it is not an encrypted credential vault. Region changes or clearing remove both copies. No shared service key is bundled.
 
-Convenience scripts:
+Tests use synthetic bookmarks and mocked provider responses. Live model availability, real response quality, account billing and native permission-dialog UX remain separate manual acceptance items.
 
-```bash
-npm run open:chrome-ext   # macOS convenience command; open chrome://extensions manually on Windows
-npm run open:devdir       # macOS convenience command; open .output/chrome-mv3-dev in Explorer on Windows
-npm run dev:clean         # wipe .wxt/ + .output/ and re-prepare, then start
-```
+## Safety and scope
 
-### Why the temp Chrome window?
+Preview → automatic snapshot → explicit review → execution → verified result. Deletion adds typed confirmation. A successful snapshot is mandatory; exporting it outside the extension is optional but important because clearing/uninstalling the extension may remove local data.
 
-`wxt dev` is wired to `web-ext-run`, which launches a fresh Chromium profile in the operating system's temporary directory. WXT 0.20 does not expose a CLI flag to skip this. Closing that temp window is harmless — it is not where the extension lives during development. On Windows and Linux, browser discovery is automatic; macOS uses the configured Chrome path. See `wxt.config.ts` for details.
+Recovery is not a promise of an atomic browser transaction. External edits, uncertain outcomes, missing evidence or repeated recovery attempts can be blocked for inspection. Recovery creates a new reviewed plan and avoids resetting the whole library.
 
-## Quality gates
+Background page requests omit credentials. Static host checks cannot guarantee DNS-rebinding prevention. Sensitive/private bookmarks should remain excluded from AI and crawling. This extension does not provide full-page archival or bypass login requirements.
 
-```bash
-npm run typecheck   # vue-tsc with WXT-generated tsconfig
-npm run test        # vitest (49 tests; 10,000-bookmark stress included)
-npm run build       # production MV3 build → .output/chrome-mv3/
-npm run zip         # zip for store upload
-npm run lint        # ESLint flat-config (TypeScript + Vue)
-```
+## Historical development records
 
-All five required commands (`typecheck`, `test`, `build`, `lint`, plus `dev`) are exercised by Phase 1 and must remain green.
-
-## Iteration 1 features
-
-- Full browser bookmark tree import (folders + leaves, ordering, IDs preserved)
-- Debounced full reconciliation on bookmark change events (safe but not incremental; improved in Phase 1)
-- IndexedDB local index (Dexie)
-- Title, URL, folder-path search; folder filter and pagination
-- JSON backup with `schemaVersion`, `browserTree`, `index` (no API keys, no page text)
-- **No** native-bookmark writes or deletes from the extension
-
-## Manual acceptance tests (Iteration 1)
-
-1. Install the extension with 3+ folders and 10+ bookmarks. Confirm counts and hierarchy.
-2. Add a bookmark in the browser; switch back to the manager and confirm it appears after a short delay.
-3. Rename a folder; search by the new folder path and confirm descendants update.
-4. Move a bookmark to another folder; confirm the displayed path changes.
-5. Delete a bookmark in the browser; confirm the index no longer contains it.
-6. Search with mixed-case title, URL fragment and folder path.
-7. Export JSON and confirm `schemaVersion`, `browserTree`, `index` fields are present.
-8. Restart the browser and reopen the manager; confirm the index persists.
-9. Click "重新同步" and confirm no duplicate records.
-10. Verify the extension never changes browser bookmarks itself.
-
-## Current constraints
-
-- Import and restore use the Phase 2 preview, plan, approval, snapshot and executor flow; no native write happens before explicit approval.
-- Change events trigger a debounced **full reconciliation**, not true per-node incremental writes; this avoids stale descendant paths on folder rename/move.
-- This build is Chrome/Edge MV3-focused; Firefox compatibility is not yet verified.
-- The current bookmark list uses in-memory filtering after loading the local index; very large bookmark sets may require indexed search or query pagination in a later phase.
-- The browser itself may sync bookmarks via the signed-in browser profile; the extension does not implement cross-device sync.
+Earlier phase reports remain in `docs/` for provenance. They describe earlier snapshots, not the current feature inventory or test coverage. The old phased guide must not be interpreted as a claim that all present UI/user journeys have passed acceptance; always check the exact commit's CI results.

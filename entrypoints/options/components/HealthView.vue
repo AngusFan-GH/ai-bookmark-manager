@@ -5,14 +5,18 @@
 // store), grouped by LinkStatus, with simple filters. Lets the user
 // trigger a scan of all bookmarks or a subset.
 
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { useBookmarkStore } from '../../../src/store';
+import { useToolsBookmarkStore } from '../../../src/store';
+import { request } from '../../../src/client';
+import type { BookmarkRecord } from '../../../src/domain/bookmarks/types';
+import { safeBookmarkHref } from '../workspace-helpers';
+import { confirmedRemovalRecords, healthEmptyText } from './tools-helpers';
 import type { LinkStatus } from '../../../src/domain/health/types';
 import type { HealthStatusSummary } from '../../../src/infrastructure/messaging/contracts';
 
-const store = useBookmarkStore();
-const emit = defineEmits<{ updated: [rows: HealthRow[]] }>();
+const store = useToolsBookmarkStore();
+const emit = defineEmits<{ updated: [rows: HealthRow[]]; 'preview-delete': [records: BookmarkRecord[]] }>();
 
 const loading = ref(false);
 type HealthRow = {
@@ -37,7 +41,34 @@ type HealthRow = {
 const status = ref<HealthStatusSummary | null>(null);
 const rows = ref<HealthRow[]>([]);
 const filter = ref<'all' | LinkStatus>('all');
-const _selectedIds = ref<string[]>([]); // reserved for Phase 4 bulk-recheck
+const selectedIds = ref<string[]>([]);
+const resultTable = ref<{clearSelection(): void}>();
+watch(filter, () => { selectedIds.value = []; resultTable.value?.clearSelection(); });
+const bookmarks = ref<BookmarkRecord[]>([]);
+const error = ref('');
+const settingBusy = ref(false);
+let refreshing = false;
+let disposed = false;
+const bookmarkMap = computed(() => new Map(bookmarks.value.map(row => [row.id, row])));
+const removalRecords = computed(() => confirmedRemovalRecords(selectedIds.value, rows.value, bookmarks.value));
+async function loadBookmarks() {
+  const all: BookmarkRecord[] = [];
+  for (let offset = 0; ; offset += 200) {
+    const page = await request<{rows: BookmarkRecord[]; total: number}>({type:'BOOKMARKS_LIST',requestId:crypto.randomUUID(),limit:200,offset});
+    all.push(...page.rows);
+    if (all.length >= page.total || !page.rows.length) break;
+  }
+  bookmarks.value = all;
+}
+async function previewRemoval() {
+  if (loading.value || refreshing) return;
+  const selected = [...selectedIds.value];
+  await refresh();
+  if (error.value) return;
+  const records = confirmedRemovalRecords(selected, rows.value, bookmarks.value);
+  if (!records.length) { ElMessage.warning('所选条目已变化，或尚未确认失效。请重新检查后再选择。'); return; }
+  emit('preview-delete', records);
+}
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 // Phase 3.5: per-extension setting. Defaults to false (dev guide
@@ -67,11 +98,15 @@ async function removeHostPermission() {
   } catch (e) { ElMessage.error(String(e)); }
 }
 async function onAllowPrivateChange(v: boolean) {
+  if (settingBusy.value) return;
+  const previous = allowPrivate.value;
+  settingBusy.value = true;
   allowPrivate.value = v;
   try {
     await store.setSetting('allowPrivateHosts', v);
     ElMessage.success(v ? '已开启内网扫描（注意 SSRF 风险）' : '已关闭内网扫描');
-  } catch (e) { ElMessage.error(String(e)); }
+  } catch (e) { allowPrivate.value = previous; ElMessage.error(String(e)); }
+  finally { settingBusy.value = false; }
 }
 
 const statusLabels: Record<LinkStatus, string> = {
@@ -82,12 +117,12 @@ const statusLabels: Record<LinkStatus, string> = {
   redirected: '已重定向',
   redirect_pending: '跳转待确认',
   auth_required: '需登录',
-  forbidden: '已禁止',
+  forbidden: '访问受限',
   rate_limited: '限流',
   suspected_dead: '疑似失效',
   confirmed_dead: '已确认失效',
-  network_error: '网络错误',
-  unsupported: '不支持',
+  network_error: '暂时不可验证',
+  unsupported: '安全策略跳过',
   permission_required: '需要权限',
 };
 
@@ -101,9 +136,9 @@ const statusColors: Record<LinkStatus, string> = {
   auth_required: 'warning',
   forbidden: 'warning',
   rate_limited: 'warning',
-  suspected_dead: 'danger',
+  suspected_dead: 'warning',
   confirmed_dead: 'danger',
-  network_error: 'danger',
+  network_error: 'warning',
   unsupported: 'info',
   permission_required: 'info',
 };
@@ -149,28 +184,35 @@ const counts = computed(() => {
 });
 
 async function refresh(showLoading = true) {
+  if (refreshing || disposed) return;
+  refreshing = true;
   if (showLoading) loading.value = true;
   try {
+    if (showLoading) await loadBookmarks();
     const s = await store.healthStatus();
     status.value = s;
     const list = await store.healthList();
     rows.value = ((list.rows ?? []) as HealthRow[]).sort((a, b) => b.checkedAt - a.checkedAt);
     emit('updated', rows.value);
+    error.value = '';
+    selectedIds.value = selectedIds.value.filter(id => rows.value.some(row => row.bookmarkId === id));
   } catch (e) {
-    ElMessage.error(String(e));
+    error.value = '无法刷新检测结果，请点击刷新重试。' + (e instanceof Error ? e.message : String(e));
   } finally {
+    refreshing = false;
     if (showLoading) loading.value = false;
   }
 }
 
-async function startScan() {
+async function startScan(ids?: string[]) {
+  if (loading.value || isRunning.value || isPaused.value) return;
   if (!hostPermissionGranted.value) {
     ElMessage.warning('请先授权网站扫描权限；未授权时不会向任何外部链接发出请求。');
     return;
   }
   loading.value = true;
   try {
-    const r = await store.startHealth();
+    const r = await store.startHealth(ids);
     ElMessage.success(`已入队: ${r.enqueued}（跳过: ${r.skipped}）`);
     await refresh();
   } catch (e) {
@@ -204,7 +246,7 @@ onMounted(() => {
     if (status.value?.status === 'running' || status.value?.status === 'paused') void refresh(false);
   }, 1_000);
 });
-onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
+onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer); });
 </script>
 
 <template>
@@ -219,13 +261,14 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
           <el-button :loading="loading" @click="() => refresh()">刷新</el-button>
           <el-button v-if="!hostPermissionGranted" type="warning" @click="requestHostPermission">授权扫描网站</el-button>
           <el-button v-else @click="removeHostPermission">撤销扫描权限</el-button>
-          <el-button :loading="loading" :disabled="!hostPermissionGranted || isRunning || isPaused" type="primary" @click="startScan">开始检查</el-button>
+          <el-button :loading="loading" :disabled="!hostPermissionGranted || isRunning || isPaused" type="primary" @click="startScan()">检查全部书签</el-button>
           <el-button :disabled="!isRunning && !isPaused" @click="pauseOrResume">{{ isRunning ? '暂停' : '继续' }}</el-button>
           <el-button :disabled="!isRunning && !isPaused" type="danger" plain @click="cancelScan">取消</el-button>
         </div>
       </div>
     </template>
 
+    <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <section v-if="status" class="progress-panel" aria-live="polite">
       <div class="progress-heading">
         <div>
@@ -261,11 +304,12 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
         <div>
           <div class="settings-title">允许扫描内网地址</div>
           <div class="muted small">开启后会尝试 localhost、192.168.x.x、.local、.lan 等内网主机。<br>
-            关闭状态下这些 URL 会被标为「不支持」并跳过。<br>
+            关闭状态下这些 URL 会被标为「安全策略跳过」。<br>
             <b>注意</b>：开启此选项意味着扩展会向你的内网发送请求（SSRF 风险）。</div>
         </div>
         <el-switch
           :model-value="allowPrivate"
+          :disabled="settingBusy || isRunning || isPaused"
           @update:model-value="onAllowPrivateChange"
           inline-prompt
           active-text="开"
@@ -277,28 +321,32 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
     <div class="filters">
       <el-radio-group v-model="filter" size="small">
         <el-radio-button value="all">全部 ({{ counts.all ?? 0 }})</el-radio-button>
+        <el-radio-button value="unchecked">未检测 ({{ counts.unchecked ?? 0 }})</el-radio-button>
         <el-radio-button value="healthy">健康 ({{ counts.healthy ?? 0 }})</el-radio-button>
         <el-radio-button value="redirected">重定向 ({{ counts.redirected ?? 0 }})</el-radio-button>
         <el-radio-button value="redirect_pending">跳转待确认 ({{ counts.redirect_pending ?? 0 }})</el-radio-button>
         <el-radio-button value="auth_required">需登录 ({{ counts.auth_required ?? 0 }})</el-radio-button>
-        <el-radio-button value="forbidden">禁止 ({{ counts.forbidden ?? 0 }})</el-radio-button>
+        <el-radio-button value="forbidden">访问受限 ({{ counts.forbidden ?? 0 }})</el-radio-button>
         <el-radio-button value="rate_limited">限流 ({{ counts.rate_limited ?? 0 }})</el-radio-button>
         <el-radio-button value="suspected_dead">疑似失效 ({{ counts.suspected_dead ?? 0 }})</el-radio-button>
         <el-radio-button value="confirmed_dead">确认失效 ({{ counts.confirmed_dead ?? 0 }})</el-radio-button>
-        <el-radio-button value="network_error">网络错误 ({{ counts.network_error ?? 0 }})</el-radio-button>
-        <el-radio-button value="unsupported">不支持 ({{ counts.unsupported ?? 0 }})</el-radio-button>
+        <el-radio-button value="network_error">暂不可验证 ({{ counts.network_error ?? 0 }})</el-radio-button>
+        <el-radio-button value="unsupported">安全跳过 ({{ counts.unsupported ?? 0 }})</el-radio-button>
         <el-radio-button value="permission_required">需授权 ({{ counts.permission_required ?? 0 }})</el-radio-button>
         <el-radio-button value="outdated">已过期 ({{ counts.outdated ?? 0 }})</el-radio-button>
       </el-radio-group>
     </div>
 
-    <el-table :data="visible" v-loading="loading" stripe max-height="500" empty-text="尚无检测结果 — 点击「开始扫描」">
+    <div class="selection-actions"><span>已选择 {{selectedIds.length}} 条</span><el-button :disabled="!selectedIds.length || loading || isRunning || isPaused || !hostPermissionGranted" @click="startScan([...selectedIds])">重新检查所选</el-button><el-button type="danger" plain :disabled="!removalRecords.length || loading || isRunning || isPaused" @click="previewRemoval">预览删除所选已确认失效书签（{{removalRecords.length}}）</el-button></div>
+    <p class="muted small">仅“已确认失效”的所选条目可以进入删除预览，仍会自动备份并要求逐项批准。疑似失效、需登录及网络错误不会被纳入删除。</p>
+    <el-table ref="resultTable" :data="visible" row-key="bookmarkId" @selection-change="(items: HealthRow[]) => selectedIds = items.map(row => row.bookmarkId)" v-loading="loading" stripe max-height="500" :empty-text="healthEmptyText(rows.length, filter)">
+      <el-table-column type="selection" :reserve-selection="true" width="45" />
       <el-table-column label="状态" width="140">
         <template #default="{ row }">
           <el-tag :type="statusColors[(row as HealthRow).status] || 'info'" size="small">{{ statusLabels[(row as HealthRow).status] || (row as HealthRow).status }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="bookmarkId" label="书签" width="150" show-overflow-tooltip />
+      <el-table-column label="书签 / 目录" min-width="220"><template #default="{row}"><strong>{{bookmarkMap.get(row.bookmarkId)?.title || '未命名书签'}}</strong><div class="muted small">{{bookmarkMap.get(row.bookmarkId)?.path || '目录信息暂不可用'}}</div></template></el-table-column>
       <el-table-column label="HTTP" width="80">
         <template #default="{ row }">{{ (row as HealthRow).httpCode || '—' }}</template>
       </el-table-column>
@@ -314,13 +362,13 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
             for valid schemes; ignored otherwise).
           -->
           <a
-            v-if="(row as HealthRow).url || (row as HealthRow).finalUrl"
+            v-if="safeBookmarkHref((row as HealthRow).url || (row as HealthRow).finalUrl)"
             :href="(row as HealthRow).url || (row as HealthRow).finalUrl"
             target="_blank"
             rel="noopener noreferrer"
             class="url-link"
           >{{ (row as HealthRow).url || (row as HealthRow).finalUrl }}</a>
-          <span v-else class="muted">—</span>
+          <span v-else class="muted">{{(row as HealthRow).url || (row as HealthRow).finalUrl || '—'}}</span>
           <!-- If the row was redirected, show a small hint that
                the finalUrl differs from the bookmarked URL. -->
           <span
@@ -346,6 +394,7 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
 </template>
 
 <style scoped>
+.selection-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:12px 0; }
 .muted { color: #8490a3; }
 .url-link {
   color: #2563eb;

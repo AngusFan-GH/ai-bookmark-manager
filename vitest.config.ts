@@ -1,6 +1,8 @@
+import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  plugins: [vue()],
   test: {
     // We run all .test.ts files inside tests/, including the legacy
     // tests/normalize.test.ts and the new tests/integration/* suites.

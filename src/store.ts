@@ -22,7 +22,7 @@ import type { LinkCheckRecord } from './domain/health/types';
 let nextRequestId = 1;
 const reqId = (): string => `r${Date.now().toString(36)}_${(nextRequestId++).toString(36)}`;
 
-export const useBookmarkStore = defineStore('bookmarks', () => {
+function setupBookmarkStore() {
   const rows = ref<BookmarkRecord[]>([]);
   const folders = ref<FolderRecord[]>([]);
   const stats = ref<StatsSummary>({
@@ -35,7 +35,11 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
   const loading = ref(false);
   const error = ref('');
 
+  let loadVersion = 0;
+  let lastQuery: [string, string | undefined, number] = ['', undefined, 0];
   async function load(query = '', folderId?: string, offset = 0): Promise<void> {
+    const version = ++loadVersion;
+    lastQuery = [query, folderId, offset];
     loading.value = true;
     error.value = '';
     try {
@@ -47,22 +51,20 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
         limit: 200,
         offset,
       });
-      rows.value = list.rows;
-      total.value = list.total;
       const s = await request<StatsSummary>({ type: 'STATS', requestId: reqId() });
-      stats.value = s;
       const f = await request<FolderRecord[]>({ type: 'BOOKMARKS_TREE', requestId: reqId() });
-      folders.value = f;
+      if (version !== loadVersion) return;
+      rows.value = list.rows; total.value = list.total; stats.value = s; folders.value = f;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e);
+      if (version === loadVersion) { error.value = e instanceof Error ? e.message : String(e); rows.value = []; total.value = 0; }
     } finally {
-      loading.value = false;
+      if (version === loadVersion) loading.value = false;
     }
   }
 
   async function sync(): Promise<void> {
     await request<{ count: number }>({ type: 'SYNC', requestId: reqId(), reason: 'manual' });
-    await load();
+    await load(...lastQuery);
   }
 
   // ---- Phase 2: backup import + plan + execute -------------------------
@@ -134,4 +136,8 @@ export const useBookmarkStore = defineStore('bookmarks', () => {
     getSetting, setSetting,
     healthPermissionStatus, requestHealthPermission, removeHealthPermission,
   };
-});
+}
+
+// Separate result sets prevent tools navigation from replacing the workspace scope.
+export const useBookmarkStore = defineStore('bookmarks', setupBookmarkStore);
+export const useToolsBookmarkStore = defineStore('bookmark-tools', setupBookmarkStore);

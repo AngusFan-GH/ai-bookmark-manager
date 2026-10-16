@@ -163,3 +163,16 @@ it.each(['completed', 'failed', 'executing', 'partially_completed', 'cancelled']
   p.status = status; await f.deps.plansStore.put(p);
   await expect(f.service.approve(p.id)).rejects.toThrow(/cannot be approved/);
 });
+
+it('captures local metadata in the downloadable import preview backup', async () => {
+ const f=fixture();const index={bookmarks:[{id:'b',title:'local'}],folders:[]};
+ f.deps.captureLocalIndex=vi.fn(async()=>index as unknown as TreeSnapshot['localIndex']);
+ await f.service.draftPlan(f.raw(),'additive');
+ expect(f.snapshots[0].localIndex).toEqual(index);
+});
+it('does not save an import plan when preview metadata capture fails', async()=>{
+ const f=fixture();f.deps.captureLocalIndex=vi.fn(async()=>{throw new Error('index backup failed');});
+ await expect(f.service.draftPlan(f.raw(),'additive')).rejects.toThrow('index backup failed');
+ expect(f.snapshots).toHaveLength(0);expect(await f.deps.plansStore.list()).toHaveLength(0);
+ expect(f.deps.bookmarksApi.create).not.toHaveBeenCalled();
+});

@@ -33,9 +33,10 @@ export default defineConfig({
   } : {}),
   manifest: {
     name: 'AI Bookmark Manager',
-    description: 'Local-first bookmark manager with safe indexing and JSON backup',
-    version: '0.1.0',
-    permissions: ['bookmarks', 'storage'],
+    description: 'AI-assisted bookmark search, native management, reviewable organization and recovery',
+    version: '0.2.0',
+    permissions: ['bookmarks', 'storage', 'activeTab', 'sidePanel'],
+    minimum_chrome_version: '116',
     // Link health is opt-in. The extension requests these at runtime from a
     // user gesture; it has no standing permission to contact arbitrary sites.
     optional_host_permissions: ['http://*/*', 'https://*/*'],

@@ -1,4 +1,4 @@
-import { registerWorkspaceHandlers } from '../src/infrastructure/messaging/workspace-handlers';
+import { registerWorkspaceHandlers, scopedBookmarks } from '../src/infrastructure/messaging/workspace-handlers';
 // entrypoints/background.ts
 //
 // MV3 service worker. Wires:
@@ -182,7 +182,7 @@ export default defineBackground(() => {
     async listBookmarks(query: string, folderId: string | undefined, limit: number, offset: number) {
       const all = await db.bookmarks.toArray();
       let rows = all;
-      if (folderId) rows = rows.filter((r) => r.parentId === folderId);
+      if (folderId) rows = scopedBookmarks(rows, await db.folders.toArray(), folderId);
       if (query.trim()) {
         rows = rows.filter((r) => matchesSearch(r, query));
       }

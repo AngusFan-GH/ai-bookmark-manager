@@ -1,104 +1,50 @@
-# Bookmark workspace implementation
+# Task-oriented bookmark workspace (0.2)
 
-This branch replaces the admin-first landing page with a native bookmark workspace.
-The browser remains the source of truth; Dexie stores the index, content snippets,
-conversations, plans, snapshots and audit records.
+## Product and source of truth
 
-## Two workflows
+Two goals drive the UI: manage native bookmarks completely, and use saved material to solve real tasks. The browser owns bookmark titles, original URLs, folders and order. IndexedDB holds the searchable mirror, extracted snippets, conversations, plans, snapshots and audit evidence.
 
-1. **Organize**: select a scope, inspect exact-URL duplicates or ask MiniMax for grouping
-   suggestions, select moves, preview the resulting plan, export its backup, explicitly
-   approve, then execute. Model output never directly calls the bookmark API. Proposed
-   new folders must have an existing parent and are created before dependent moves.
-2. **Find references**: create a scoped conversation and ask for relevant saved material.
-   Refine in subsequent turns; references map to stored bookmark IDs and original URLs.
-   Citation snapshots are stable across ordering changes and versioned on URL changes.
+The goal box provides immediate local search and an explicit AI action. A conversation uses unified `assist` mode; users need not select a model task mode. Legacy recommend/organize sessions remain readable. Fixed scope includes folder descendants, an optional literal query, and optionally 1–60 selected bookmark IDs. The UI shows the scope; proposals never expand it silently.
 
-## Running locally
+## Entry points and actions
 
-```sh
-npm ci
-npm test
-npm run typecheck
-npm run lint
-npm run build
-```
+- Popup: editable current-page save, existing-URL detection, up to five local results, optional title/folder advice, full-workspace capture handoff. Captures are stored under opaque session IDs and expire after an hour.
+- Workspace: dynamic browse/conversation/change-review surface; directory and history drawers. Direct CRUD works without MiniMax.
+- Sidepanel: same workspace document, with expansion to a full tab. Browser shell behavior is distinct from document rendering tests.
+- Tools: backup/import and link health, not another full manager. Tool query state is isolated from the main workspace.
 
-Load `.output/chrome-mv3` as an unpacked extension in an **isolated test browser profile**
-first. Successful CI also provides a `bookmark-workspace-chrome` artifact: download,
-unzip, and select the extracted directory containing `manifest.json` in Chrome’s
-“Load unpacked” dialog. This is a test build, not a store installation.
-Do not use real bookmarks for acceptance testing. The popup opens the workspace;
-backup import/export and link-health tools remain available in the secondary tools dialog.
+Explicit folder deletions expand to child-first reviewed steps, capped at 500 steps. Prepared operations are checked again against native browser state. Multi-step editing projects expected state so an update followed by a move does not become stale because of its own update.
 
-## MiniMax and data handling
+## AI and trust
 
-The implementation currently supports a personal, session-key connection with explicit
-consent. The regional endpoints are `https://api.minimax.cn/v1/chat/completions` and
-`https://api.minimax.io/v1/chat/completions`. Keys are kept in `chrome.storage.session`,
-not IndexedDB, sync storage, exports or logs. No key is bundled. Changing region clears
-the old key. The user grants the exact provider origin from a settings click.
+MiniMax returns structured references and proposals: existing-ID moves, title edits, deletion proposals and new folders. Unknown fields/IDs, generated action URLs, unsupported shapes and conflicting action targets fail validation. Safe complete JSON wrappers and omitted empty proposal lists are accepted. No partial JSON repair is used to invent operations.
 
-Default configurable model: `MiniMax-M2.5`. This is a conservative supported default,
-not a claim about the latest model. Requests are non-streaming in this iteration, with
-loading/cancel/error states. Live API access and model-account compatibility require
-separate verification with the owner's chosen account; automated tests use synthetic
-responses only.
+All cited URLs are mapped from stored records. Limited metadata/text is evidence, not proof that the whole original article was read. Fresh-query relevance takes priority over a bounded set of recent references. Large scopes may use a small query-expansion call before the final response; folder catalogs and candidate lists are bounded. Invalid expansion falls back to ordinary retrieval and does not broaden scope.
 
-MiniMax recommends keeping keys out of client code. This personal-BYOK design is a
-security tradeoff, not suitable for distributing a shared provider key. A multi-user
-service must use a trusted server proxy and its own authentication/rate limits. The
-owner's deployment choice remains to be confirmed.
+New-bookmark advice is ephemeral and returns only a title, an existing folder and a reason, never a generated URL or a browser write.
 
-A turn transmits the question, prior provider conversation, bounded candidate bookmark
-metadata and optional extracted snippets. Candidate selection scans the full local
-corpus then caps the request; the UI discloses how many items were included/omitted.
-A broad request may need a narrower folder scope. Metadata-only results must not be
-presented as verified article summaries. Provider reasoning is retained internally for
-multi-turn protocol continuity and is not sent to the UI.
+## Credentials, privacy and content
 
-## Optional content extraction
+Regional endpoints: `https://api.minimax.cn/v1/chat/completions` and `https://api.minimax.io/v1/chat/completions`. Exact provider permission and data-sharing consent are required. Personal BYOK is supported; a shared commercial provider key requires a server-side design and is not bundled here.
 
-Selected pages are fetched only after a user action and exact-origin permission.
-Requests omit credentials and referrer, do not execute page scripts and revalidate
-manual redirects. Limits: 12 seconds, 1 MiB response, 12,000 extracted characters.
-Static HTML only; dynamic/login-protected/PDF pages may be unavailable. Unknown content
-is not inferred. Static host guards do not provide DNS-rebinding protection; sensitive
-intranet bookmarks should not be crawled. Browser-hidden redirect destinations fail
-closed.
+Session-only key storage is default. Optional local persistence is explicit, region-bound, restricted to trusted extension contexts where supported, not additionally encrypted, not synced, and excluded from exports/history/logs. Clearing or changing region removes both copies; storage failures block further use until resolved. Saving settings is not a connectivity test.
 
-## Backup and execution guarantees
+Excluded folders apply recursively to outbound AI data. Known private hosts, credential-bearing URLs and recognizable secret/signature parameters are conservatively excluded. This is not a universal secret detector. Historical transmitted candidate records, including uncited ones, are revalidated against current policy; moved/excluded/changed resources require a fresh task rather than resending stale history.
 
-- Preview snapshots can be exported before approval.
-- A fresh durable snapshot is captured before actual native writes. Failure prevents
-  writes. Snapshot metadata includes the local bookmark/folder index.
-- Every targeted native item is rechecked against preview state.
-- Nested restores map newly assigned native IDs before child operations.
-- Only one execution runs at a time; approval tokens are one-use and bound to a plan.
-- Automatic compensation checks observed post-write state and refuses to overwrite
-  external edits. Deletes cannot be automatically compensated; use the backup.
-- A browser crash between a native write and its audit persistence is inherently
-  non-transactional. Inspect the native tree before retrying; do not blindly reapply.
+Content enhancement defaults off. When explicitly enabled, a turn can read at most three relevant pages only if their host access is already granted; no new permission dialog is silently triggered. Matching cached text is reused for seven days. User-selected extraction supports up to 50 items. Fetches omit credentials/referrer, do not execute scripts, revalidate redirect targets, and are bounded to 12 seconds/1 MiB/12,000 characters. Only a limited snippet is sent to the model. Content can be inspected by status and cleared; dynamic/login/PDF content may not be readable.
 
-Restoration is exposed through backup import with preview and a new approval. Additive
-restore avoids deleting new unrelated entries. Controlled merge can delete entries
-created since the backup: inspect the complete diff before choosing that mode. Browser
-IDs/timestamps may change on reconstruction. This is not an unconditional full-state
-undo guarantee. Default exports exclude conversations, page text and secrets; no
-additional tags/notes editing is shipped in this iteration.
+## Backup, approval and recovery
 
-## Tests and limitations
+Draft creation persists an exportable preview snapshot. Execution captures a second fresh durable snapshot before native writes. Both include available local index metadata, but default exports exclude secrets, conversations and page text. The UI requires explicit review; manual external download is optional. Deletions need typed confirmation.
 
-`npm run test:browser` runs the production extension in a temporary Chromium profile
-with synthetic bookmarks and mocked MiniMax responses. It changes only a temporary
-copy of the built service worker to install its network mock; the shipped build is
-unchanged. Screenshots/results go to `E2E_ARTIFACT_DIR` (or an OS temporary directory).
-Install test browser with `npx playwright install --with-deps chromium` first.
+Historical backup export remains available after execution. Targeted recovery prepares a new plan using verified before/after evidence, preserves unrelated additions, maps recreated folder IDs, and blocks conflicts or ambiguous histories. It is not a blanket rollback guarantee; see `src/domain/operations/RECOVERY.md`.
 
-GitHub Actions `Verify bookmark workspace` runs unit/integration tests, typecheck,
-lint, build and browser acceptance on feature pushes/PRs. Passing unit tests alone does
-not establish native-browser behavior or real MiniMax quality. See CI result for the
-specific commit and `docs/TESTING_WORKSPACE.md` for checkpoints.
+External import defaults to additive mode. Controlled merge is advanced and matches browser IDs, not title similarity; it can modify/delete entries absent from the backup. Cross-profile identity is not interchangeable. Unsupported metadata-merge promises are removed. Reopening resets the mode, repeated file selection works, and going back after approval creates a fresh draft/review cycle rather than reusing a consumed token.
 
-Deferred: continuous streaming, full-page archival/dynamic rendering, semantic vector
-index, autonomous write agents, scheduled full-library crawling and server-hosted keys.
+## Verification and remaining limits
+
+Vitest covers domain, persistence, router races, privacy, popup, editor and mounted tool/workspace interactions. Playwright loads the built extension in an isolated Chromium profile with synthetic bookmark data and mocked MiniMax. The test-only fetch bootstrap is added only to a temporary build copy, not the distributed artifact. Native permission dialogs are pregranted in tests; live model quality is not mocked coverage.
+
+CI artifacts include screenshots/report and a production unpacked extension only when all gates succeed. Check exact commit CI rather than relying on an earlier test count. No real user bookmarks or account keys are used by automated acceptance.
+
+Not included: a shared hosted-key service, Firefox validation, full archival/dynamic-page rendering, an independent tag system, notes editor, reading streaks, automatic whole-library reorganization, or silent deletion. Browser service-worker suspension/crashes remain non-transactional; uncertain outcomes must be inspected rather than blindly retried.

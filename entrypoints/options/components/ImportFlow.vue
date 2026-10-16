@@ -12,9 +12,9 @@
 
 import { ref, computed, watch } from 'vue';
 import { exportPlanBackup } from '../../../src/workspace-client';
-import { downloadableJson } from '../workspace-helpers';
+import { downloadableJson, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel } from '../workspace-helpers';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { useBookmarkStore } from '../../../src/store';
+import { useToolsBookmarkStore } from '../../../src/store';
 import type {
   ImportPreview,
   OperationPlan,
@@ -23,7 +23,7 @@ import type {
   ExecuteResultMsg,
 } from '../../../src/infrastructure/messaging/contracts';
 
-const store = useBookmarkStore();
+const store = useToolsBookmarkStore();
 
 const open = ref(false);
 const step = ref<'preview' | 'plan' | 'execute' | 'done'>('preview');
@@ -33,7 +33,12 @@ const loading = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 const rawJson = ref<string>('');
 const fileName = ref<string>('');
-const mode = ref<'additive' | 'additive-with-meta' | 'controlled-merge'>('additive');
+const mode = ref<'additive' | 'controlled-merge'>('additive');
+const advanced = ref(false);
+const deleteConfirmation = ref('');
+const actionError = ref('');
+let previewVersion = 0;
+const planCards = computed(() => (plan.value?.steps ?? []).map(step => ({ step, view: describePlanStep(step, plan.value?.steps ?? [], store.folders, store.rows) })));
 const preview = ref<ImportPreview | null>(null);
 const previewError = ref('');
 
@@ -55,6 +60,14 @@ const executing = ref(false);
 const result = ref<ExecuteResultMsg | null>(null);
 
 function reset() {
+  previewVersion++;
+  if (fileInput.value) fileInput.value.value = '';
+  mode.value = 'additive';
+  advanced.value = false;
+  deleteConfirmation.value = '';
+  actionError.value = '';
+  backupDownloaded.value = false;
+  backupConfirmed.value = false;
   step.value = 'preview';
   loading.value = false;
   rawJson.value = '';
@@ -70,6 +83,7 @@ function reset() {
 function openModal() {
   reset();
   open.value = true;
+  void store.load();
 }
 
 function closeModal() {
@@ -77,34 +91,33 @@ function closeModal() {
 }
 
 function pickFile() {
+  if (fileInput.value) fileInput.value.value = '';
   fileInput.value?.click();
 }
 
 async function onFileChange(ev: Event) {
-  const input = ev.target as HTMLInputElement;
-  const file = input.files?.[0];
+  const file = (ev.target as HTMLInputElement).files?.[0];
   if (!file) return;
-  if (file.size > 50 * 1024 * 1024) {
-    ElMessage.error('文件超过 50 MB 上限');
-    return;
-  }
-  fileName.value = file.name;
-  rawJson.value = await file.text();
-  await runPreview();
+  previewVersion++;
+  preview.value = null; rawJson.value = ''; previewError.value = ''; fileName.value = file.name;
+  if (file.size > 50 * 1024 * 1024) { previewError.value = '文件超过 50 MB 上限，请选择较小的备份文件。'; return; }
+  loading.value = true;
+  try { rawJson.value = await file.text(); }
+  catch { previewError.value = '无法读取文件，请重新选择本机上的 JSON 备份。'; }
+  finally { loading.value = false; }
+  if (rawJson.value) await runPreview();
 }
 
 async function runPreview() {
   if (!rawJson.value) return;
-  loading.value = true;
-  previewError.value = '';
-  preview.value = null;
+  const version = ++previewVersion;
+  loading.value = true; previewError.value = ''; preview.value = null;
   try {
-    preview.value = await store.previewImport(rawJson.value, mode.value);
+    const next = await store.previewImport(rawJson.value, mode.value);
+    if (version === previewVersion) preview.value = next;
   } catch (e) {
-    previewError.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
+    if (version === previewVersion) previewError.value = e instanceof Error ? e.message : String(e);
+  } finally { if (version === previewVersion) loading.value = false; }
 }
 
 async function onModeChange() {
@@ -119,14 +132,14 @@ const conflictsLabel = computed(() => {
 });
 
 async function createPlan() {
-  if (!rawJson.value) return;
-  loading.value = true;
+  if (!rawJson.value || loading.value) return;
+  loading.value = true; actionError.value = ''; deleteConfirmation.value = '';
   try {
     const p = await store.draftPlan(rawJson.value, mode.value, `Import: ${fileName.value || 'backup'}`);
     plan.value = p;
     step.value = 'plan';
   } catch (e) {
-    ElMessage.error('创建计划失败: ' + (e instanceof Error ? e.message : String(e)));
+    actionError.value = '创建计划失败：' + (e instanceof Error ? e.message : String(e));
   } finally {
     loading.value = false;
   }
@@ -137,7 +150,7 @@ const highRiskCount = computed(() =>
 );
 
 async function approvePlan() {
-  if (!plan.value || !backupDownloaded.value || !backupConfirmed.value || loading.value) return;
+  if (!plan.value || !backupConfirmed.value || loading.value || (highRiskCount.value > 0 && deleteConfirmation.value !== '删除')) return;
   if (highRiskCount.value > 0) {
     try {
       await ElMessageBox.confirm(
@@ -154,19 +167,22 @@ async function approvePlan() {
     approval.value = await store.approve(plan.value.id, 5 * 60_000);
     step.value = 'execute';
   } catch (e) {
-    ElMessage.error('批准失败: ' + (e instanceof Error ? e.message : String(e)));
+    actionError.value = '批准未完成，请重新生成计划并审核：' + (e instanceof Error ? e.message : String(e));
   } finally {
     loading.value = false;
   }
 }
 
 async function runExecute() {
-  if (!plan.value || !approval.value) return;
+  if (!plan.value || !approval.value || executing.value) return;
+  if (Date.now() >= approval.value.expiresAt) { actionError.value = '批准已过期。请重新生成计划，并再次审核。'; return; }
+  actionError.value = '';
   executing.value = true;
   try {
     const r = await store.execute(plan.value.id, approval.value.token, false);
     result.value = r;
     step.value = 'done';
+    try { plan.value = await store.getPlan(plan.value.id); } catch { actionError.value = '执行结果已返回，但步骤详情暂未加载。可关闭后在操作历史查看。'; }
     if (r.failed === 0) {
       ElMessage.success(`完成: ${r.succeeded} 步成功`);
     } else {
@@ -175,7 +191,8 @@ async function runExecute() {
     // Refresh the bookmark list so the UI reflects the new state.
     void store.load();
   } catch (e) {
-    ElMessage.error('执行失败: ' + (e instanceof Error ? e.message : String(e)));
+    actionError.value = '执行未完成。请先到操作历史核对结果；需要重试时重新生成并审核计划。' + (e instanceof Error ? e.message : String(e));
+    approval.value = null;
   } finally {
     executing.value = false;
   }
@@ -183,18 +200,8 @@ async function runExecute() {
 
 function back() {
   if (step.value === 'plan') step.value = 'preview';
-  else if (step.value === 'execute') step.value = 'plan';
+  else if (step.value === 'execute') { approval.value = null; void createPlan(); }
 }
-
-const actionLabel = (a: OperationStep['action']): string => {
-  switch (a) {
-    case 'create': return '新建';
-    case 'rename': return '重命名';
-    case 'update': return '更新';
-    case 'move': return '移动';
-    case 'delete': return '删除';
-  }
-};
 
 defineExpose({ open: openModal });
 </script>
@@ -213,7 +220,7 @@ defineExpose({ open: openModal });
     <el-dialog
       v-model="open"
       title="导入 JSON 备份"
-      width="780"
+      width="min(880px,94vw)"
       :close-on-click-modal="false"
       :show-close="!loading && !executing"
       :close-on-press-escape="!loading && !executing"
@@ -221,24 +228,26 @@ defineExpose({ open: openModal });
       align-center
       @closed="reset"
     >
+      <p class="stage-label">{{step === 'preview' ? '1 / 3 · 选择文件并预览' : step === 'plan' ? '2 / 3 · 核对更改' : step === 'execute' ? '3 / 3 · 执行已审核计划' : '导入结果'}}</p>
+      <el-alert v-if="actionError" :title="actionError" type="warning" :closable="false" show-icon />
       <!-- Step 1: Preview -->
       <div v-if="step === 'preview'" class="step-pane">
-        <p class="muted">选择一个导出的 JSON 备份文件，预览它对当前浏览器书签的影响。导入是只读预览；只有在你点击"批准并执行"后才会真正写入浏览器。</p>
+        <p class="muted">选择本扩展导出的 JSON 备份文件，预览它对当前浏览器书签的影响。预览不会更改书签；只有审核批准后再点击“执行”才会写入浏览器。</p>
         <div class="row">
           <el-button @click="pickFile" :loading="loading">{{ fileName ? '更换文件' : '选择文件' }}</el-button>
           <span v-if="fileName" class="file-name">{{ fileName }}</span>
         </div>
+        <p class="muted">此工具恢复原生书签结构，不恢复本地元数据。备份中的浏览器 ID 用于匹配；重复导入已恢复的条目可能产生副本。建议先使用“仅添加”并核对计划。</p>
+        <el-checkbox v-model="advanced" :disabled="loading || mode === 'controlled-merge'">显示高级合并模式（可能修改和删除当前书签）</el-checkbox>
         <el-form label-width="80" class="mode-form">
           <el-form-item label="导入模式">
-            <el-radio-group v-model="mode" @change="onModeChange">
+            <el-radio-group v-model="mode" :disabled="loading" @change="onModeChange">
               <el-radio-button value="additive">仅添加</el-radio-button>
-              <el-radio-button value="additive-with-meta">添加 + 本地元数据</el-radio-button>
-              <el-radio-button value="controlled-merge">受控合并</el-radio-button>
+              <el-radio-button v-if="advanced" value="controlled-merge">受控合并</el-radio-button>
             </el-radio-group>
             <div class="mode-hint">
               <span v-if="mode === 'additive'">只创建当前不存在的节点；不会修改或删除任何现有书签。</span>
-              <span v-else-if="mode === 'additive-with-meta'">同"仅添加"；本地索引中的元数据会与导入合并。</span>
-              <span v-else>可更新同名节点；可删除导入中不存在的节点。删除前会要求再次确认。</span>
+              <span v-else>按照浏览器书签 ID 匹配并更新或移动现有节点，还会删除备份中不存在的当前节点。不同浏览器或配置文件的相同 ID 可能属于无关书签，请勿用于跨浏览器合并。</span>
             </div>
           </el-form-item>
         </el-form>
@@ -264,28 +273,19 @@ defineExpose({ open: openModal });
         <el-card shadow="never" class="plan-card">
           <div class="plan-head">
             <div><b>{{ plan.title }}</b></div>
-            <div class="muted">{{ plan.description }}</div>
-            <div class="muted small">计划 id: {{ plan.id }} · 步骤: {{ plan.steps.length }}</div>
+            <div class="muted">{{ mode === 'additive' ? '仅添加缺失节点，保留现有书签' : '高级合并：可能修改、移动和删除现有书签' }}</div>
+            <div class="muted small">共 {{ plan.steps.length }} 项更改</div>
           </div>
-          <el-table :data="plan.steps" max-height="380" stripe size="small">
-            <el-table-column prop="order" label="#" width="60" />
-            <el-table-column label="操作" width="100">
-              <template #default="{ row }">
-                <el-tag :type="row.riskLevel === 'high' ? 'danger' : 'info'" size="small">{{ actionLabel(row.action) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="目标" min-width="200">
-              <template #default="{ row }">{{ row.targetBrowserId || row.parentBrowserId || '—' }}</template>
-            </el-table-column>
-            <el-table-column label="预期 → 期望" min-width="240" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span class="muted small">{{ JSON.stringify(row.expectedBefore) }}</span>
-                <span class="arrow">→</span>
-                <span class="small">{{ JSON.stringify(row.desiredAfter) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="reason" label="原因" min-width="180" show-overflow-tooltip />
-          </el-table>
+          <article v-for="{step: item, view} in planCards" :key="item.id" class="review-step">
+            <el-tag :type="item.action === 'delete' ? 'danger' : 'info'">{{view.action}}</el-tag>
+            <strong>{{item.action === 'create' ? view.targetTitle : view.sourceTitle}}</strong>
+            <p v-if="item.action !== 'create'">原目录：{{view.sourcePath}}</p>
+            <p v-if="view.sourceUrl">原始 URL：{{view.sourceUrl}}</p>
+            <p v-if="item.action === 'delete'">将从浏览器原生书签中删除此条目。</p>
+            <template v-else><p>目标目录：{{view.targetPath}}</p><p v-if="view.targetTitle !== view.sourceTitle">新标题：{{view.targetTitle}}</p><p v-if="view.targetUrl !== view.sourceUrl">新 URL：{{view.targetUrl}}</p></template>
+            <details><summary>技术详情</summary><p>目标 ID：{{item.targetBrowserId || item.parentBrowserId}}</p><p>{{JSON.stringify(item.expectedBefore)}} → {{JSON.stringify(item.desiredAfter)}}</p></details>
+          </article>
+          <el-empty v-if="!plan.steps.length" description="无需更改，当前书签与此导入模式一致。" />
           <el-alert
             v-if="highRiskCount > 0"
             type="warning"
@@ -294,7 +294,10 @@ defineExpose({ open: openModal });
             :title="`包含 ${highRiskCount} 个高风险步骤（删除）。点击批准时会要求再次确认。`"
           />
         </el-card>
-        <div class="backup-review"><el-button :loading="loading" @click="downloadBackup">导出此计划的恢复备份</el-button><el-checkbox v-model="backupConfirmed" :disabled="!backupDownloaded || loading">我已保存备份，并核对以上所有更改</el-checkbox></div>
+        <el-alert title="已自动保留本地恢复快照，执行前还会重新备份。可另存文件到电脑上。" type="info" :closable="false" />
+        <p v-if="backupDownloaded" role="status">已发起下载，请确认备份文件已保存。</p>
+        <label v-if="highRiskCount > 0">确认删除：输入“删除”<el-input v-model="deleteConfirmation" placeholder="删除" :disabled="loading" /></label>
+        <div class="backup-review"><el-button :loading="loading" @click="downloadBackup">另存恢复备份（可选）</el-button><el-checkbox v-model="backupConfirmed" :disabled="loading">我已逐项核对并同意以上所有更改</el-checkbox></div>
       </div>
 
       <!-- Step 3: Approve + execute -->
@@ -311,18 +314,21 @@ defineExpose({ open: openModal });
       <div v-else-if="step === 'done' && result" class="step-pane">
         <el-result
           :icon="result.failed === 0 ? 'success' : 'warning'"
-          :title="result.status"
+          :title="planStatusLabel(result.status)"
           :sub-title="`${result.succeeded} 成功 / ${result.failed} 失败 / ${result.compensated} 已补偿`"
         />
+        <p>关闭工具后，可在工作台“操作历史”查看本计划。若有失败，请先核对原生书签，再使用备份恢复或重新生成计划。</p>
+        <article v-for="item in plan?.steps" :key="item.id" class="review-step"><strong>{{item.expectedBefore.title || item.desiredAfter.title || item.targetBrowserId}}</strong> · {{stepStatusLabel(item.status)}}<p v-if="item.errorMessage">{{stepErrorLabel(item.errorMessage)}}</p></article>
       </div>
 
       <template #footer>
         <div class="footer">
           <el-button v-if="step === 'plan' || step === 'execute'" @click="back" :disabled="loading || executing">上一步</el-button>
           <el-button v-if="step === 'preview'" :disabled="!rawJson" @click="runPreview" :loading="loading">刷新预览</el-button>
-          <el-button v-if="step === 'preview'" :disabled="!preview" type="primary" @click="createPlan" :loading="loading">创建计划</el-button>
-          <el-button v-if="step === 'plan'" :disabled="!backupDownloaded || !backupConfirmed" type="primary" @click="approvePlan" :loading="loading">批准</el-button>
-          <el-button v-if="step === 'execute'" type="primary" @click="runExecute" :loading="executing">执行</el-button>
+          <el-button v-if="step === 'preview'" :disabled="!preview || loading" type="primary" @click="createPlan" :loading="loading">创建计划</el-button>
+          <el-button v-if="step === 'plan'" :disabled="!plan?.steps.length || !backupConfirmed || (highRiskCount > 0 && deleteConfirmation !== '删除')" type="primary" @click="approvePlan" :loading="loading">批准</el-button>
+          <el-button v-if="step === 'execute' && actionError" :disabled="executing || loading" @click="createPlan">重新生成并审核</el-button>
+          <el-button v-if="step === 'execute'" :disabled="!approval || !!actionError" type="primary" @click="runExecute" :loading="executing">执行</el-button>
           <el-button v-if="step === 'done'" @click="closeModal">关闭</el-button>
         </div>
       </template>
@@ -331,6 +337,9 @@ defineExpose({ open: openModal });
 </template>
 
 <style scoped>
+.review-step { border:1px solid #e3e7ef; border-radius:8px; padding:14px; margin:10px 0; overflow-wrap:anywhere; }
+.review-step strong { margin-left:8px; }
+.review-step details { color:#66738a; font-size:12px; }
 .backup-review { display:flex; flex-direction:column; gap:12px; align-items:flex-start; margin-top:16px; }
 .muted { color: #8490a3; }
 .small { font-size: 12px; }

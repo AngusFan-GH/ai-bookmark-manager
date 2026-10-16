@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFolderTree, safeBookmarkHref, initialSearch, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, actionLabel, riskLabel, planStatusLabel, stepErrorLabel, stepStatusLabel, hasPlanExecutionResult, folderDisplayPath } from '../../entrypoints/options/workspace-helpers';
+import { buildFolderTree, safeBookmarkHref, initialSearch, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, actionLabel, riskLabel, planStatusLabel, stepErrorLabel, stepStatusLabel, hasPlanExecutionResult, folderDisplayPath, duplicateDeleteSteps, contentResultLabel, workspaceErrorLabel } from '../../entrypoints/options/workspace-helpers';
 import { flattenTree } from '../../src/domain/bookmarks/normalize';
 import type { FolderRecord } from '../../src/domain/bookmarks/types';
 const folder = (id:string,parentId:string|null,index=0):FolderRecord => ({id,browserId:id,parentId,index,title:id,path:'untrusted cached path',updatedAt:0,syncGeneration:0});
@@ -12,7 +12,7 @@ describe('workspace presentation boundaries', () => {
 
 describe('workspace write gates and origin permissions', () => {
   const ready = {status:'validated',stepCount:1,applied:false,backedUp:true,reviewed:true,hasDeletes:false,deleteConfirmation:'',busy:false};
-  it('requires both downloaded backup acknowledgement and reviewed plan',()=>{
+  it('requires both verified backup evidence and explicit plan review',()=>{
     expect(canExecuteReviewedPlan(ready)).toBe(true);
     expect(canExecuteReviewedPlan({...ready,backedUp:false})).toBe(false);
     expect(canExecuteReviewedPlan({...ready,reviewed:false})).toBe(false);
@@ -106,4 +106,47 @@ describe('normalized folder display paths',()=>{
     expect(folderDisplayPath({path:'',title:''})).toBe('根目录');
     expect(folderDisplayPath(undefined)).toBe('目录名称不可用');
   });
+});
+
+
+describe('exact duplicate cleanup selection',()=>{
+  const groups=[{bookmarks:[{id:'a',browserId:'native-a'},{id:'b',browserId:'native-b'}]},{bookmarks:[{id:'c',browserId:'native-c'},{id:'d',browserId:'native-d'}]}];
+  it('requires explicit choices and preserves at least one original in each group',()=>{
+    expect(()=>duplicateDeleteSteps(groups,[])).toThrow('先选择');
+    expect(()=>duplicateDeleteSteps(groups,['a','b'])).toThrow('至少需要保留');
+    expect(()=>duplicateDeleteSteps(groups,['c','d'])).toThrow('至少需要保留');
+  });
+  it('previews only selected native records without relying on display names',()=>{
+    expect(duplicateDeleteSteps(groups,['b','c']).map(step=>[step.action,step.targetBrowserId])).toEqual([['delete','native-b'],['delete','native-c']]);
+    expect(duplicateDeleteSteps(groups,['a','a'])).toHaveLength(1);
+  });
+  it('rejects stale or out-of-scope selections',()=>{expect(()=>duplicateDeleteSteps(groups,['unknown'])).toThrow('重新检查');});
+});
+describe('safe readable content feedback',()=>{
+  it('translates every content outcome without leaking arbitrary provider errors',()=>{
+    expect(contentResultLabel('ready')).toContain('已提取');
+    expect(contentResultLabel('login_required')).toContain('需要登录');
+    expect(contentResultLabel('unsupported')).toContain('不支持');
+    expect(contentResultLabel('unavailable','Host permission not granted')).toContain('权限');
+    expect(contentResultLabel('unavailable','Request timed out')).toContain('超时');
+    expect(contentResultLabel('unavailable','secret-token https://private.test/?key=secret')).not.toContain('secret');
+  });
+  it('never repeats raw remote exception messages',()=>{
+    for(const error of [new Error('sk-secret https://private.test'),new Error('API key sk-secret rejected'),new Error('permission https://private.test?token=secret')]){
+      expect(workspaceErrorLabel(error)).not.toContain('secret');expect(workspaceErrorLabel(error)).not.toContain('https://');
+    }
+  });
+});
+
+
+it('validates edited AI folder names only when their moves are selected',()=>{
+ const moves=[{bookmarkId:'a',targetFolderId:'new:folder',reason:'Selected move'}];const folders=[{proposalId:'new:folder',title:'   ',parentFolderId:'bar'}];
+ expect(organizationSteps(moves,folders,[])).toEqual([]);
+ expect(()=>organizationSteps(moves,folders,['a'])).toThrow('名称不能为空');
+ expect(organizationSteps(moves,[{...folders[0],title:'  Learning  '}],['a'])[0].desiredAfter?.title).toBe('Learning');
+});
+it('shows new bookmarks in their parent folder without appending the bookmark title as a directory',()=>{
+ const step={id:'create',action:'create',riskLevel:'low',parentBrowserId:'bar',expectedBefore:{},desiredAfter:{title:'Learn Vue',url:'https://vuejs.org/?original=YES#intro'}} as unknown as import('../../src/domain/operations/types').OperationStep;
+ const view=describePlanStep(step,[step],[{...folder('bar',null),path:'Bookmarks bar'}],[]);
+ expect(view.targetPath).toBe('Bookmarks bar');expect(view.targetTitle).toBe('Learn Vue');expect(view.targetUrl).toBe('https://vuejs.org/?original=YES#intro');
 });

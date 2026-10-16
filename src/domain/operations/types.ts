@@ -97,6 +97,9 @@ export interface OperationStep {
    * "sync.generation=12; verified against chrome.bookmarks.get(b123)".
    */
   evidence: string[];
+  /** Durable execution evidence, never supplied by callers or used as approval. */
+  recoveryBefore?: Record<string, unknown>;
+  recoveryAfter?: Record<string, unknown>;
 }
 
 export interface OperationPlan {

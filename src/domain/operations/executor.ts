@@ -148,6 +148,10 @@ export class OperationExecutor {
   }
 
   private async run(plan: OperationPlan, opts: ExecuteOptions): Promise<ExecuteResult> {
+    const persisted = await this.deps.readPlan(plan.id);
+    if (persisted && !['draft', 'validated', 'approved'].includes(persisted.status)) {
+      throw new AppErrorImpl('INVALID_REQUEST', 'operation already attempted; create a new reviewed plan', false);
+    }
     if (plan.steps.length > 0) {
       if (!opts.approvalToken) {
         throw new AppErrorImpl('INVALID_REQUEST', 'approvalToken required for non-empty plan', false);
@@ -174,6 +178,8 @@ export class OperationExecutor {
     await this.deps.validate(plan);
 
     if (plan.steps.length && !opts.dryRun) await this.deps.captureSnapshot(plan);
+    plan.status = 'executing';
+    await this.deps.savePlan(plan);
 
     const ordered = sortSteps(plan.steps);
     let succeeded = 0;
@@ -238,6 +244,9 @@ export class OperationExecutor {
       try {
         // Persist the intent before the browser write so recovery/audit can
         // distinguish a pending step from one interrupted mid-operation.
+        if (executionStep.action !== 'create' && executionStep.targetBrowserId) {
+          step.recoveryBefore = stateForCompensation(await this.deps.bookmarksApi.get(executionStep.targetBrowserId));
+        }
         step.status = 'running';
         await this.deps.saveStep(step);
         await this.audit(plan, step, 'started');
@@ -264,7 +273,19 @@ export class OperationExecutor {
                 throw new Error('written target changed before readback');
               }
             }
+            // Also reject concurrent changes to fields this write did not own.
+            // Otherwise a later compensation could mistake them for our output.
+            if (step.recoveryBefore) {
+              for (const key of ['id', 'title', 'url', 'parentId', 'dateAdded']) {
+                if (executionStep.desiredAfter[key] === undefined && observed[key] !== step.recoveryBefore[key]) {
+                  throw new Error('unrelated target field changed before readback');
+                }
+              }
+            } else if (observed.parentId !== executionStep.parentBrowserId) {
+              throw new Error('created target moved before readback');
+            }
             observedAfter.set(step.id, observed);
+            step.recoveryAfter = observed;
           } catch {
             await this.audit(plan, step, 'post-write state unavailable or changed; automatic compensation disabled');
           }
@@ -432,8 +453,8 @@ export class OperationExecutor {
       case 'update': {
         if (!step.targetBrowserId) return;
         const changes: UpdateBookmarkInput = {};
-        if (typeof step.expectedBefore.title === 'string') changes.title = step.expectedBefore.title;
-        if (typeof step.expectedBefore.url === 'string') changes.url = step.expectedBefore.url;
+        if (step.desiredAfter.title !== undefined && typeof step.expectedBefore.title === 'string') changes.title = step.expectedBefore.title;
+        if (step.desiredAfter.url !== undefined && typeof step.expectedBefore.url === 'string') changes.url = step.expectedBefore.url;
         if (Object.keys(changes).length > 0) await api.update(step.targetBrowserId, changes);
         return;
       }
