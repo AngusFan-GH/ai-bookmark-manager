@@ -10,6 +10,9 @@ import { mkdtemp, cp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileAsync=promisify(execFile);
 const root = process.cwd();
 const temp = await mkdtemp(path.join(tmpdir(), 'bookmark-e2e-'));
 const extension = path.join(temp, 'extension');
@@ -18,6 +21,7 @@ await mkdir(artifactDir, {recursive:true});
 await cp(path.join(root, '.output/chrome-mv3'), extension, {recursive:true});
 const manifest = JSON.parse(await readFile(path.join(extension,'manifest.json'),'utf8'));
 manifest.host_permissions = ['https://api.minimax.io/*','https://api.minimax.cn/*'];
+if(process.env.E2E_NATIVE_POPUP==='shortcut') manifest.commands={...manifest.commands,_execute_action:{suggested_key:{default:'Ctrl+Shift+Y'}}};
 await writeFile(path.join(extension,'manifest.json'),JSON.stringify(manifest));
 const background = path.join(extension, manifest.background.service_worker);
 const mock = `
@@ -76,7 +80,9 @@ try {
  context = await chromium.launchPersistentContext(path.join(temp,'profile'), {
   ...(process.env.CHROMIUM_PATH ? {executablePath:process.env.CHROMIUM_PATH} : {channel:'chromium'}), headless:process.env.E2E_HEADED !== '1',
   args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--disable-dev-shm-usage','--disable-background-networking'],
-  viewport:{width:1440,height:1000},acceptDownloads:true,
+  // Native action popups must retain their own browser-managed dimensions.
+  // A context default viewport also gets applied to CDP other targets.
+  viewport:null,acceptDownloads:true,
  });
  // Even accidental page navigations cannot reach a real website.
  await context.route(/^https?:\/\//,route=>route.request().url().startsWith('https://example.test/')
@@ -84,7 +90,7 @@ try {
  worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
  const extensionId = new URL(worker.url()).host;
  const optionsUrl=`chrome-extension://${extensionId}/options.html`;
- page = await context.newPage(); page.on('pageerror', e=>errors.push(e.message));
+ page = await context.newPage();await page.setViewportSize({width:1440,height:1000});page.on('pageerror', e=>errors.push(e.message));
  await page.goto(optionsUrl);
  await page.getByText('Bookmark Workspace',{exact:true}).waitFor(); pass('production extension loads and workspace renders');
  const native = (fn,arg) => page.evaluate(fn,arg);
@@ -270,10 +276,11 @@ try {
  // Opening popup.html as a tab cannot reproduce Chrome's activeTab grant. Use the real extension action popup.
  const sourcePage=await context.newPage();await sourcePage.goto('https://example.test/capture?Keep=YES#frag');await sourcePage.bringToFront();
  const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
- await worker.evaluate(()=>chrome.action.openPopup());
+ if(process.env.E2E_NATIVE_POPUP==='shortcut') await execFileAsync('xdotool',['key','--clearmodifiers','ctrl+shift+y']);
+ else await worker.evaluate(()=>chrome.action.openPopup());
  const cdp=await context.newCDPSession(sourcePage);
  const targets=await cdp.send('Target.getTargets');
- await writeFile(path.join(artifactDir,'popup-targets.json'),JSON.stringify({headed:process.env.E2E_HEADED==='1',targets},null,2));
+ await writeFile(path.join(artifactDir,'popup-targets.json'),JSON.stringify({headed:process.env.E2E_HEADED==='1',nativePopup:process.env.E2E_NATIVE_POPUP??'openPopup',targets},null,2));
  console.log('Popup target diagnostics:',JSON.stringify(targets));
  const popup=await popupPromise;
  assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();

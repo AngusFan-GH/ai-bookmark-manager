@@ -4,7 +4,7 @@ import ImportFlow from '../../entrypoints/options/components/ImportFlow.vue';
 import HealthView from '../../entrypoints/options/components/HealthView.vue';
 const mocks = vi.hoisted(() => ({
   previewImport: vi.fn(), draftPlan: vi.fn(), approve: vi.fn(), execute: vi.fn(), getPlan: vi.fn(), load:vi.fn(),
-  getSetting:vi.fn(), healthPermissionStatus:vi.fn(), healthStatus:vi.fn(), healthList:vi.fn(), request:vi.fn(), exportPlanBackup:vi.fn(),
+  getSetting:vi.fn(), setSetting:vi.fn(), healthPermissionStatus:vi.fn(), healthStatus:vi.fn(), healthList:vi.fn(), request:vi.fn(), exportPlanBackup:vi.fn(),
 }));
 vi.mock('../../src/store', () => ({ useToolsBookmarkStore: () => ({...mocks, rows:[], folders:[]}) }));
 vi.mock('../../src/client', () => ({ request: mocks.request }));
@@ -15,7 +15,8 @@ let app: App | undefined; let host: HTMLDivElement;
 async function flush() { for (let i=0;i<8;i++) await nextTick(); await new Promise(resolve => setTimeout(resolve,0)); }
 function mount(component: typeof ImportFlow | typeof HealthView) {
   host = document.createElement('div');document.body.append(host);app=createApp(component);
-  for (const name of ['ElCard','ElForm','ElFormItem','ElRadioGroup','ElRadioButton','ElTag','ElEmpty','ElResult','ElProgress','ElSwitch']) app.component(name,passthrough);
+  for (const name of ['ElCard','ElForm','ElFormItem','ElRadioGroup','ElRadioButton','ElTag','ElEmpty','ElResult','ElProgress']) app.component(name,passthrough);
+  app.component('ElSwitch',defineComponent({props:['modelValue','disabled'],emits:['update:modelValue'],setup(props,{emit}){return()=>h('button',{role:'switch','aria-checked':!!props.modelValue,disabled:props.disabled,onClick:()=>emit('update:modelValue',!props.modelValue)},'切换内网扫描');}}));
   app.component('ElAlert',defineComponent({props:['title'],setup(props){return()=>h('p',props.title);}}));
   app.component('ElTable',defineComponent({props:['data'],setup(props,{slots}){provide('rows',computed(()=>props.data));return()=>h('div',slots.default?.());}}));
   app.component('ElTableColumn',defineComponent({setup(_,{slots}){const rows=inject<ComputedRef<Array<Record<string,unknown>>>>('rows');return()=>h('div',(rows?.value??[]).map(row=>slots.default?.({row})));}}));
@@ -29,7 +30,7 @@ function mount(component: typeof ImportFlow | typeof HealthView) {
 async function click(text: string) {const button=[...host.querySelectorAll('button')].find(b=>b.textContent?.trim()===text);expect(button,`button ${text}`).toBeTruthy();button!.click();await flush();}
 async function pick() {const input=host.querySelector('input[type=file]') as HTMLInputElement;Object.defineProperty(input,'files',{configurable:true,value:[{name:'backup.json',size:10,text:async()=>'{"formatVersion":1}'}]});input.dispatchEvent(new Event('change'));await flush();}
 const plan = () => ({id:crypto.randomUUID(), title:'Import test',status:'draft',steps:[{id:'s',action:'create',desiredAfter:{title:'Recovered'},expectedBefore:{},riskLevel:'low',status:'pending'}]});
-beforeEach(()=>{vi.clearAllMocks();mocks.previewImport.mockResolvedValue({formatVersion:1,totalNodes:1,summary:{adds:1,updates:0,moves:0,deletes:0,noops:0},conflicts:[]});mocks.draftPlan.mockImplementation(async()=>plan());mocks.approve.mockResolvedValue({token:'token',expiresAt:Date.now()+300000});mocks.load.mockResolvedValue(undefined);mocks.request.mockResolvedValue({rows:[],total:0});mocks.getSetting.mockResolvedValue(false);mocks.healthPermissionStatus.mockResolvedValue({granted:false});mocks.healthStatus.mockResolvedValue(null);mocks.healthList.mockResolvedValue({rows:[]});});
+beforeEach(()=>{vi.clearAllMocks();mocks.previewImport.mockResolvedValue({formatVersion:1,totalNodes:1,summary:{adds:1,updates:0,moves:0,deletes:0,noops:0},conflicts:[]});mocks.draftPlan.mockImplementation(async()=>plan());mocks.approve.mockResolvedValue({token:'token',expiresAt:Date.now()+300000});mocks.load.mockResolvedValue(undefined);mocks.request.mockResolvedValue({rows:[],total:0});mocks.getSetting.mockResolvedValue(false);mocks.setSetting.mockResolvedValue(undefined);mocks.healthPermissionStatus.mockResolvedValue({granted:false});mocks.healthStatus.mockResolvedValue(null);mocks.healthList.mockResolvedValue({rows:[]});});
 afterEach(()=>{app?.unmount();host?.remove();});
 describe('import interaction safety',()=>{
   it('allows reviewed approval with automatic snapshot and no mandatory download',async()=>{
@@ -68,6 +69,18 @@ describe('import interaction safety',()=>{
 });
 
 describe('health result rendering',()=>{
+  it('keeps advanced network settings closed and makes the toggle reachable after expansion',async()=>{
+    mount(HealthView);await flush();
+    const disclosure=host.querySelector('button[aria-controls="health-private-settings"]')!;
+    expect(disclosure.getAttribute('aria-expanded')).toBe('false');
+    expect(host.querySelector('[role="switch"][aria-label="允许扫描内网地址"]')).toBeNull();
+    await click('高级设置 · 内网扫描');
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true');
+    const toggle=host.querySelector('[role="switch"][aria-label="允许扫描内网地址"]') as HTMLButtonElement;
+    expect(toggle).not.toBeNull();expect(toggle.disabled).toBe(false);
+    toggle.click();await flush();expect(mocks.setSetting).toHaveBeenCalledWith('allowPrivateHosts',true);
+    await click('收起高级设置');expect(disclosure.getAttribute('aria-expanded')).toBe('false');
+  });
   it('shows bookmark titles and keeps unsafe schemes as plain text',async()=>{
     mocks.request.mockResolvedValue({rows:[{id:'private-id',title:'Bookmarklet',path:'Tools',url:'javascript:alert(1)',kind:'bookmark',syncGeneration:1},{id:'web',title:'Saved page',path:'Docs',url:'https://saved.test',kind:'bookmark',syncGeneration:1}],total:2});
     mocks.healthList.mockResolvedValue({rows:[{bookmarkId:'private-id',url:'javascript:alert(1)',status:'unsupported',checkedAt:1,evidence:[],syncGeneration:1},{bookmarkId:'web',url:'https://saved.test',status:'healthy',checkedAt:1,evidence:[],syncGeneration:1}]});

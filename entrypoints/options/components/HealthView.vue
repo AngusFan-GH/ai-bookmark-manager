@@ -75,6 +75,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 // § 0.1 SSRF defense). Toggling it on causes a re-scan to pick up
 // localhost / 192.168.x.x / .local / .lan hosts.
 const allowPrivate = ref(false);
+const advancedOpen = ref(false);
 const hostPermissionGranted = ref(false);
 async function loadSetting() {
   try { allowPrivate.value = await store.getSetting('allowPrivateHosts'); } catch { /* ignore */ }
@@ -299,7 +300,9 @@ onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer)
          user opt in to scanning localhost / 192.168.x.x / .local. The
          dev guide § 0.1 warns this is a SSRF surface; we surface that
          warning text in the help line. -->
-    <el-card shadow="never" class="settings-card">
+    <section class="advanced-settings">
+      <button type="button" class="advanced-toggle" :aria-expanded="advancedOpen" aria-controls="health-private-settings" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级设置' : '高级设置 · 内网扫描' }}</button>
+    <el-card v-if="advancedOpen" id="health-private-settings" shadow="never" class="settings-card">
       <div class="settings-row">
         <div>
           <div class="settings-title">允许扫描内网地址</div>
@@ -308,6 +311,7 @@ onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer)
             <b>注意</b>：开启此选项意味着扩展会向你的内网发送请求（SSRF 风险）。</div>
         </div>
         <el-switch
+          aria-label="允许扫描内网地址"
           :model-value="allowPrivate"
           :disabled="settingBusy || isRunning || isPaused"
           @update:model-value="onAllowPrivateChange"
@@ -317,6 +321,7 @@ onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer)
         />
       </div>
     </el-card>
+    </section>
 
     <div class="filters">
       <el-radio-group v-model="filter" size="small">
@@ -415,6 +420,9 @@ onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer)
 .active-links { display: grid; gap: 4px; margin: 12px 0 0; font-size: 12px; color: #475569; word-break: break-all; }
 .active-links span { padding-left: 8px; border-left: 2px solid var(--el-color-warning); }
 .permission-notice { margin-bottom: 14px; }
+.advanced-settings { margin-bottom:14px; }
+.advanced-toggle { border:0; background:none; padding:8px 0; color:#526277; font:inherit; font-size:13px; cursor:pointer; text-align:left; }
+.advanced-toggle:focus-visible { outline:2px solid #426ae8; outline-offset:3px; }
 .settings-card { margin-bottom: 14px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-title { font-weight: 500; margin-bottom: 4px; }

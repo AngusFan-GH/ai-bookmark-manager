@@ -84,7 +84,7 @@ export function createAssistantService({ repository, provider, now = Date.now, i
       scope = structuredClone(scope);
       if (scope.bookmarkIds !== undefined) {
         const known = new Set((await repository.listBookmarks()).filter(b => b.kind === 'bookmark' && b.url).map(b => b.id));
-        if (scope.bookmarkIds.some(b => !known.has(b))) throw new AssistantError('validation', '选中的书签已不存在，请重新选择。');
+        if (scope.bookmarkIds.some(b => !known.has(b))) throw new AssistantError('validation', '部分所选书签不可用于 AI：可能已删除、被隐私排除或地址不受支持。请调整选择；本地书签不会因此删除。');
       }
       if (scope.folderId && !(await repository.listFolders()).some(f => f.id === scope.folderId)) throw new AssistantError('validation', '选择的文件夹已不存在。');
       const time = now();

@@ -8,7 +8,7 @@ npx playwright install --with-deps chromium
 E2E_HEADED=1 PW_CHROMIUM_ATTACH_TO_OTHER=1 xvfb-run -a npm run test:browser
 ```
 
-CI uses headed Chromium under Xvfb so native extension chrome is present. The pinned Playwright implementation requires `PW_CHROMIUM_ATTACH_TO_OTHER=1` to attach extension action popup targets classified as CDP `other`; this is a runner-only setting, not an application modification. Target discovery is retained in `popup-targets.json`. Set `E2E_HEADED=1` on a desktop with a display, or use the Xvfb command above on Linux. Omit it for headless diagnostic runs; native action popup support is not assumed there.
+CI uses headed Chromium under Xvfb, Openbox and a D-Bus session so native extension chrome has window-manager support. It installs distro `openbox`, `xdotool` and `dbus-x11`, then sets `E2E_NATIVE_POPUP=shortcut` to invoke a test-only `_execute_action` shortcut (Ctrl+Shift+Y) in the copied manifest. The production manifest is unchanged; the actual browser action gesture supplies active-tab access. This replaces a programmatic `chrome.action.openPopup` path that crashed Chromium in the previous CI environment. The pinned Playwright implementation requires `PW_CHROMIUM_ATTACH_TO_OTHER=1` to attach extension action popup targets classified as CDP `other`; this is a runner-only setting, not an application modification. Target discovery is retained in `popup-targets.json`. The persistent context uses `viewport: null`; only ordinary workspace pages receive explicit viewport emulation, so the native popup retains its browser-managed dimensions. Set `E2E_HEADED=1` on a desktop with a display, or use the Xvfb command above on Linux. Omit it for headless diagnostic runs; native action popup support is not assumed there.
 
 Use `CHROMIUM_PATH` for a specific Chromium binary, never an existing browser profile. Artifacts default to `/tmp/bookmark-e2e-artifacts`; override with `E2E_ARTIFACT_DIR`.
 
@@ -33,7 +33,7 @@ Pregranting avoids the native permissions dialog; the suite does **not** prove t
 - Mocked 429 and aborted provider requests retain the draft; retry succeeds.
 - AI selection scope transmits exactly one explicitly selected bookmark.
 - Workspace/import/health/sidepanel screenshots at 390, 768, 1024 and 1440 px assert no document-level horizontal overflow. Keyboard local search is exercised.
-- The actual extension action popup is opened with `chrome.action.openPopup`; active synthetic page quick-save and local popup search are exercised.
+- The actual extension action popup is opened with a browser action keyboard shortcut under CI; active synthetic page quick-save and local popup search are exercised.
 - Uncaught workspace/popup errors fail the run.
 
 A PASS line is emitted only after its assertions run. `report.json` records completed checks and any failure; a build or syntax check alone is never browser acceptance. Popup native-window behavior, layout and selector compatibility must be established by a full Chromium run. Sidepanel screenshots load its real extension document, not the browser's native sidepanel shell.
