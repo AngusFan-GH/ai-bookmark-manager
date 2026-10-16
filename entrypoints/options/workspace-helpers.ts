@@ -81,3 +81,8 @@ export function stepErrorLabel(error: string | null): string {
   if (/dry-run/i.test(error)) return '仅模拟检查，未应用更改。';
   return '此步骤未完成。请核对原生书签与恢复备份；需要重试时请重新生成并审核计划。';
 }
+
+/** Completion belongs to a plan ID, not to the last object loaded into the review pane. */
+export function hasPlanExecutionResult(plan: {id:string;status:string} | undefined, executedPlanIds: ReadonlySet<string>): boolean {
+  return !!plan && (executedPlanIds.has(plan.id) || ['completed','partially_completed','failed'].includes(plan.status));
+}

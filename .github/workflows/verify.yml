@@ -31,3 +31,10 @@ jobs:
           name: browser-acceptance
           path: ${{ runner.temp }}/bookmark-e2e-artifacts
           if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: bookmark-workspace-chrome
+          path: .output/chrome-mv3/
+          include-hidden-files: true
+          if-no-files-found: error

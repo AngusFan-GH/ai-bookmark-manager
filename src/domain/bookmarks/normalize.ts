@@ -110,11 +110,12 @@ export function flattenTree(
   const visit = (node: RawBookmarkNode, ancestors: string[]): void => {
     const hasChildren = Array.isArray(node.children) && node.children.length > 0;
     const hasUrl = typeof node.url === 'string' && node.url.length > 0;
-    const kind: import('./types').BookmarkKind = hasChildren
-      ? 'folder'
-      : hasUrl
-        ? 'bookmark'
-        : 'separator';
+    // Native Chrome/Edge folders have no URL, including empty folders and
+    // the root. Child count cannot distinguish them from other node kinds.
+    // Only an explicit separator marker is treated as a separator.
+    const kind: import('./types').BookmarkKind = node.type === 'separator'
+      ? 'separator'
+      : hasUrl ? 'bookmark' : 'folder';
     const title = node.title ?? '';
     const browserId = String(node.id);
     const parentId = node.parentId != null ? String(node.parentId) : null;

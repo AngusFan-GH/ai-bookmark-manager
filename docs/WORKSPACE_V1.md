@@ -25,7 +25,10 @@ npm run build
 ```
 
 Load `.output/chrome-mv3` as an unpacked extension in an **isolated test browser profile**
-first. Do not use real bookmarks for acceptance testing. The popup opens the workspace;
+first. Successful CI also provides a `bookmark-workspace-chrome` artifact: download,
+unzip, and select the extracted directory containing `manifest.json` in Chrome’s
+“Load unpacked” dialog. This is a test build, not a store installation.
+Do not use real bookmarks for acceptance testing. The popup opens the workspace;
 backup import/export and link-health tools remain available in the secondary tools dialog.
 
 ## MiniMax and data handling

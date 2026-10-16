@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFolderTree, safeBookmarkHref, initialSearch, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, actionLabel, riskLabel, planStatusLabel, stepErrorLabel, stepStatusLabel } from '../../entrypoints/options/workspace-helpers';
+import { buildFolderTree, safeBookmarkHref, initialSearch, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, actionLabel, riskLabel, planStatusLabel, stepErrorLabel, stepStatusLabel, hasPlanExecutionResult } from '../../entrypoints/options/workspace-helpers';
 import type { FolderRecord } from '../../src/domain/bookmarks/types';
 const folder = (id:string,parentId:string|null,index=0):FolderRecord => ({id,browserId:id,parentId,index,title:id,path:'untrusted cached path',updatedAt:0,syncGeneration:0});
 describe('workspace presentation boundaries', () => {
@@ -66,4 +66,25 @@ it('shows safe execution failure explanations without echoing arbitrary secrets'
   expect(stepErrorLabel('compensation failed: secret')).toContain('自动补偿也未完成');
   expect(stepErrorLabel('skipped due to earlier failure')).toContain('前面的步骤失败');
   expect(stepErrorLabel(null)).toBe('');
+});
+
+describe('plan-bound execution completion',()=>{
+  it('keeps completion after refreshing the same plan object and blocks replay',()=>{
+    const executed=new Set(['applied-plan']);
+    const beforeRefresh={id:'applied-plan',status:'validated'};
+    const afterRefresh={id:'applied-plan',status:'completed'};
+    expect(hasPlanExecutionResult(beforeRefresh,executed)).toBe(true);
+    expect(hasPlanExecutionResult({...afterRefresh},executed)).toBe(true);
+    expect(canExecuteReviewedPlan({status:beforeRefresh.status,stepCount:1,applied:hasPlanExecutionResult(beforeRefresh,executed),backedUp:true,reviewed:true,hasDeletes:false,deleteConfirmation:'',busy:false})).toBe(false);
+  });
+  it('does not transfer completion to another draft and remembers a revisited plan',()=>{
+    const executed=new Set(['first']);
+    expect(hasPlanExecutionResult({id:'second',status:'validated'},executed)).toBe(false);
+    expect(hasPlanExecutionResult(undefined,executed)).toBe(false);
+    expect(hasPlanExecutionResult({id:'first',status:'validated'},executed)).toBe(true);
+  });
+  it('recognizes terminal history results without local execution state',()=>{
+    for(const status of ['completed','partially_completed','failed']) expect(hasPlanExecutionResult({id:'history',status},new Set())).toBe(true);
+    for(const status of ['draft','validated','approved','executing','cancelled']) expect(hasPlanExecutionResult({id:'other',status},new Set())).toBe(false);
+  });
 });

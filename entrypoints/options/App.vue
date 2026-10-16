@@ -6,7 +6,7 @@ import * as workspace from '../../src/workspace-client';
 import type { BookmarkRecord } from '../../src/domain/bookmarks/types';
 import type { OperationPlan } from '../../src/domain/operations/types';
 import type { AssistantMode } from '../../src/domain/assistant/types';
-import { buildFolderTree, safeBookmarkHref, initialSearch, downloadableJson, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel } from './workspace-helpers';
+import { buildFolderTree, safeBookmarkHref, initialSearch, downloadableJson, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel, hasPlanExecutionResult } from './workspace-helpers';
 import LegacyTools from './LegacyTools.vue';
 type SessionView = workspace.AssistantSessionView;
 const store = useBookmarkStore();
@@ -15,7 +15,8 @@ const section = ref<'browse'|'organize'|'history'>('browse'); const chatOpen = r
 const busy = ref(false); const sending = ref(false); const error = ref(''); const prompt = ref(''); const mode = ref<AssistantMode>('recommend');
 const session = ref<SessionView>(); const sessions = ref<Array<{id:string;title:string}>>([]); const selected = ref<BookmarkRecord[]>([]);
 const settings = ref({ region: 'global' as 'global'|'cn', model: 'MiniMax-M2.5', hasKey: false, consent: false }); const apiKey = ref('');
-const plan = ref<OperationPlan>(); const backedUp = ref(false); const reviewed = ref(false); const deleteConfirmation = ref(''); const applied = ref(false);
+const plan = ref<OperationPlan>(); const backedUp = ref(false); const reviewed = ref(false); const deleteConfirmation = ref(''); const executedPlanIds = ref(new Set<string>());
+const applied = computed(()=>hasPlanExecutionResult(plan.value,executedPlanIds.value));
 const duplicates = ref<Array<{url:string;bookmarks:BookmarkRecord[]}>>([]); const history = ref<Array<{id:string;title:string;status:string}>>([]);
 const tree = computed(() => buildFolderTree(store.folders));
 const currentFolder = computed(() => store.folders.find(f => f.id === folderId.value)?.title || '全部书签');
@@ -38,7 +39,7 @@ let refreshQueue=Promise.resolve();let refreshVersion=0;
 async function refresh() {const version=++refreshVersion;const args=[query.value,folderId.value||undefined,(page.value-1)*200] as const;refreshQueue=refreshQueue.catch(()=>{}).then(async()=>{if(version===refreshVersion)await store.load(...args);});await refreshQueue;}
 watch([query,folderId],()=>{page.value=1; selected.value=[]; if(timer)clearTimeout(timer); timer=setTimeout(()=>void refresh(),200);});
 watch(page,()=>void refresh());
-watch(plan,()=>{backedUp.value=false;reviewed.value=false;deleteConfirmation.value='';applied.value=false;},{deep:true});
+watch(plan,()=>{backedUp.value=false;reviewed.value=false;deleteConfirmation.value='';},{deep:true});
 function pickFolder(node:{id:string}) {folderId.value=node.id;section.value='browse';}
 async function copy(url:string) { try {await navigator.clipboard.writeText(url);ElMessage.success('原始 URL 已复制');}catch{ElMessage.error('无法复制，请从详情中选择原始 URL');} }
 function download(data:unknown,name:string) {const url=URL.createObjectURL(downloadableJson(data));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}
@@ -50,7 +51,7 @@ async function saveSettings() {await run(async()=>{if(settings.value.consent){co
 async function prepareMoves() {await run(async()=>{const steps=organizationSteps(moves.value,focusedAssistant.value?.folders??[],selectedMoves.value);plan.value=await workspace.prepareOrganization({title:'AI 目录整理建议',steps});section.value='organize';});}
 async function prepareDelete() {await run(async()=>{plan.value=await workspace.prepareOrganization({title:'删除选中的书签',steps:selected.value.filter(b=>b.kind==='bookmark').map(b=>({action:'delete' as const,targetBrowserId:b.browserId,reason:'用户在工作台明确选择'}))});section.value='organize';});}
 async function backupPlan() {await run(async()=>{if(!plan.value)return;const data=await workspace.exportPlanBackup(plan.value.id);download(data,`bookmark-plan-${plan.value.id}.json`);backedUp.value=true;});}
-async function applyPlan() {if(!canApply.value||!plan.value)return;await run(async()=>{const id=plan.value!.id;const approval=await store.approve(id);const result=await store.execute(id,approval.token);applied.value=true;reviewed.value=false;await refresh();plan.value=await store.getPlan(id);ElMessage.info(`执行结果：${planStatusLabel(result.status)}。${result.succeeded} 项成功，${result.failed} 项失败，${result.compensated} 项已补偿。请在历史中查看各步骤。`);});}
+async function applyPlan() {if(!canApply.value||!plan.value)return;await run(async()=>{const id=plan.value!.id;const approval=await store.approve(id);const result=await store.execute(id,approval.token);executedPlanIds.value.add(id);reviewed.value=false;await refresh();plan.value=await store.getPlan(id);ElMessage.info(`执行结果：${planStatusLabel(result.status)}。${result.succeeded} 项成功，${result.failed} 项失败，${result.compensated} 项已补偿。请在历史中查看各步骤。`);});}
 async function openHistory() {section.value='history';await run(async()=>{history.value=(await workspace.listHistory()).map(item=>({...item,id:item.planId}));});}
 async function extractContent() {try {await ElMessageBox.confirm(`将访问选中的 ${selected.value.length} 个书签网页，提取有长度限制的文本。不会读取登录信息；网站将收到网络请求。是否继续？`,'读取书签内容',{confirmButtonText:'读取所选页面',cancelButtonText:'取消',type:'warning'});}catch{return;} await run(async()=>{const origins=selectedOrigins(selected.value.map(b=>b.url));if(!origins.length)throw new Error('所选书签中没有可读取的 HTTP(S) 地址。');const granted=await chrome.permissions.request({origins});if(!granted)throw new Error('未授予所选网站的访问权限，未读取页面。');const result=await workspace.fetchContent(selected.value.map(b=>b.id));ElMessage.info(result.results.map(r=>`${r.bookmarkId}: ${r.status}${r.reason?' · '+r.reason:''}`).join('；'));});}
 function visibility(){if(!document.hidden)void refresh();}

@@ -23,21 +23,26 @@ const background = path.join(extension, manifest.background.service_worker);
 const mock = `
 // TEST ONLY bootstrap: never forward requests to the internet.
 globalThis.__mockCalls = [];
+globalThis.__mockErrors = [];
 globalThis.fetch = async (url, init) => {
+ try {
  if (String(url) !== 'https://api.minimax.io/v1/chat/completions') throw new Error('E2E blocked network');
  const body = JSON.parse(init.body); globalThis.__mockCalls.push(body);
  const context = JSON.parse(body.messages.at(-1).content);
  const bookmark = context.bookmarks.find(b => b.title === 'Synthetic Guide');
  const folder = context.existingFolders.find(f => f.title === 'Synthetic Target');
+ if (!bookmark) throw new Error('Synthetic Guide missing from provider bookmark candidates');
+ if (context.mode==='organize' && !folder) throw new Error('Empty Synthetic Target folder missing from provider existingFolders');
  const message = {role:'assistant', content:JSON.stringify({text: 'Synthetic answer '+globalThis.__mockCalls.length,
  references:[{bookmarkId:bookmark.bookmarkId,reason:'Synthetic relevance'}],
  folders: context.mode==='organize' ? [{proposalId:'new:synthetic',title:'Synthetic AI Folder',parentFolderId:folder.id}] : [],
  moves: context.mode==='organize' ? [{bookmarkId:bookmark.bookmarkId,targetFolderId:'new:synthetic',reason:'Synthetic move'}] : []})};
  return new Response(JSON.stringify({choices:[{message,finish_reason:'stop'}]}),{status:200,headers:{'content-type':'application/json'}});
+ } catch(error) {globalThis.__mockErrors.push(String(error));throw error;}
 };
 `;
 await writeFile(background,mock+await readFile(background,'utf8'));
-let context; let page; const checks=[]; const errors=[];
+let context; let page; let worker; const checks=[]; const errors=[];
 const pass = name => { checks.push(name); console.log('PASS',name); };
 try {
  context = await chromium.launchPersistentContext(path.join(temp,'profile'), {
@@ -45,7 +50,7 @@ try {
   args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--disable-dev-shm-usage','--disable-background-networking'],
   viewport:{width:1440,height:1000},acceptDownloads:true,
  });
- let worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+ worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
  const extensionId = new URL(worker.url()).host;
  page = await context.newPage(); page.on('pageerror', e=>errors.push(e.message));
  await page.goto(`chrome-extension://${extensionId}/options.html`);
@@ -68,6 +73,9 @@ try {
  await request('SYNC'); await page.reload();
  await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();
  const rows=await request('BOOKMARKS_LIST',{limit:200}); assert(rows.rows.some(b=>b.browserId===ids.guide)); pass('native nested bookmarks synchronize to IndexedDB and rendered UI');
+ const indexedFolders=await request('BOOKMARKS_TREE');
+ assert(indexedFolders.some(f=>f.browserId===ids.target), 'Empty native Synthetic Target folder must appear in indexed folders');
+ pass('empty native destination folder remains available to workspace and assistant');
  await page.getByRole('button',{name:'整理计划',exact:true}).click();
  await page.getByRole('button',{name:'检查完全相同的 URL',exact:true}).click();
  await page.locator('.duplicate-card').waitFor(); assert.equal(await page.locator('.duplicate-card p').count(),2); pass('duplicate preview finds exact original URL pair without deletion');
@@ -132,6 +140,8 @@ try {
  await writeFile(path.join(artifactDir,'report.json'),JSON.stringify({checks,errors,syntheticOnly:true,mockProvider:true},null,2));
  console.log(`Artifacts: ${artifactDir}`);
 } catch(error) {
+ // These diagnostics contain only the synthetic fixture; never save auth headers.
+ if(worker) {const diagnostics=await worker.evaluate(()=>({mockErrors:globalThis.__mockErrors,mockCalls:globalThis.__mockCalls})).catch(e=>({diagnosticError:String(e)}));await writeFile(path.join(artifactDir,'mock-diagnostics.json'),JSON.stringify(diagnostics,null,2));console.error('Mock diagnostics:',JSON.stringify(diagnostics));}
  if(page) {await page.screenshot({path:path.join(artifactDir,'failure.png'),fullPage:true}).catch(()=>{}); console.error((await page.locator('body').innerText().catch(()=>'' )).slice(0,4500));}
  await writeFile(path.join(artifactDir,'report.json'),JSON.stringify({checks,errors,failure:String(error),syntheticOnly:true,mockProvider:true},null,2));
  throw error;

@@ -75,6 +75,8 @@ export type SyncReason = 'manual' | 'startup' | 'event';
  */
 export interface RawBookmarkNode {
   id: string;
+  /** Optional explicit node kind from compatible bookmark APIs/imports. */
+  type?: BookmarkKind;
   parentId?: string;
   title?: string;
   url?: string;

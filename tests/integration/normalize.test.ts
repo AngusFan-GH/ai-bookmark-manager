@@ -24,11 +24,12 @@ import { makeEmptyTree, makeTreeWithCollisions, makeFlatTree } from '../fixtures
 import type { RawBookmarkNode } from '../../src/domain/bookmarks/types';
 
 describe('flattenTree — shape and totals', () => {
-  it('handles an empty tree (root with no children)', () => {
+  it('preserves an empty native root as a folder', () => {
     const flat = flattenTree(makeEmptyTree(), { now: 0, generation: 1 });
-    expect(flat.totalCount).toBe(0);
+    expect(flat.totalCount).toBe(1);
     expect(flat.bookmarks).toEqual([]);
-    expect(flat.folders).toEqual([]);
+    expect(flat.folders).toHaveLength(1);
+    expect(flat.folders[0].parentId).toBeNull();
   });
 
   it('records a folder row for each folder node', () => {
@@ -165,4 +166,31 @@ describe('isScannableUrl', () => {
   it('rejects garbage', () => {
     expect(isScannableUrl('not a url')).toBe(false);
   });
+});
+
+
+it('indexes empty native folders with or without an explicit children array', () => {
+  const flat = flattenTree([{ id: '0', title: '', children: [
+    { id: '1', parentId: '0', title: 'Bar', children: [
+      { id: 'empty-array', parentId: '1', title: 'Empty A', children: [] },
+      { id: 'empty-no-array', parentId: '1', title: 'Empty B' },
+    ] },
+  ] }], { now: 123, generation: 4 });
+  expect(flat.folders.map(f => f.id)).toEqual(['0', '1', 'empty-array', 'empty-no-array']);
+  expect(flat.folders.find(f => f.id === 'empty-array')).toMatchObject({ path: 'Bar / Empty A', syncGeneration: 4 });
+  expect(flat.bookmarks).toEqual([]);
+  expect(flat.totalCount).toBe(4);
+});
+
+it('keeps an actually empty tree empty', () => {
+  expect(flattenTree([], { now: 0, generation: 1 }).totalCount).toBe(0);
+});
+
+it('does not index explicitly marked separators as empty folders', () => {
+  const flat = flattenTree([{ id: '0', children: [
+    { id: 'separator', parentId: '0', type: 'separator', title: '' },
+    { id: 'folder', parentId: '0', title: '' },
+  ] }], { now: 0, generation: 1 });
+  expect(flat.folders.map(f => f.id)).toEqual(['0', 'folder']);
+  expect(flat.bookmarks).toEqual([]);
 });
