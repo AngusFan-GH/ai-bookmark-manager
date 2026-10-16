@@ -53,6 +53,12 @@ async function eventually(assertion, timeout=10000) {
  do {try {await assertion();return;}catch(error){last=error;await new Promise(resolve=>setTimeout(resolve,100));}} while(Date.now()<deadline);
  throw last;
 }
+// Element Plus uses visually hidden native inputs. Click their associated visible
+// label exactly as a user would, then assert the native checked state.
+async function choose(input, checked=true) {
+ if(await input.isChecked() !== checked) await input.locator('xpath=ancestor::label[1]').click();
+ assert.equal(await input.isChecked(),checked,'Visible label must update native checked state');
+}
 async function screenshot(name) {await page.screenshot({path:path.join(artifactDir,name+'.png'),fullPage:true});}
 async function noBodyOverflow(label) {
  const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,width:innerWidth}));
@@ -86,7 +92,7 @@ try {
   const target=await chrome.bookmarks.create({parentId:root.id,title:'Synthetic Target'});
   const guide=await chrome.bookmarks.create({parentId:nested.id,title:'Synthetic Guide',url:'https://example.test/guide?Original=YES#frag'});
   const duplicate=await chrome.bookmarks.create({parentId:source.id,title:'Synthetic Duplicate',url:guide.url});
-  return {root:root.id,source:source.id,nested:nested.id,target:target.id,guide:guide.id,duplicate:duplicate.id};
+  return {root:root.id,rootTitle:root.title,source:source.id,nested:nested.id,target:target.id,guide:guide.id,duplicate:duplicate.id};
  });
  await request('SYNC');await page.reload();
  await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();
@@ -101,7 +107,7 @@ try {
   const box=page.locator('.approval-box');const execute=box.getByRole('button',{name:/^批准并执行/});
   await execute.waitFor();assert(await execute.isDisabled());
   await box.getByText('写入前快照已自动保存到此设备',{exact:false}).waitFor();
-  await box.getByRole('checkbox',{name:'已逐项核对并批准以上更改',exact:true}).check();
+  await choose(box.getByRole('checkbox',{name:'已逐项核对并批准以上更改',exact:true}));
   if(deletion){assert(await execute.isDisabled());await box.getByPlaceholder('删除',{exact:true}).fill('删除');}
   await execute.click();await box.getByText('此计划已执行，不能重复执行。恢复操作也会先生成新的预览供你审核。',{exact:true}).waitFor();
   assert.equal(await box.getByRole('button',{name:/^批准并执行/}).count(),0);
@@ -118,8 +124,9 @@ try {
  await page.getByRole('button',{name:'AI 设置',exact:true}).click();
  await model().fill('MiniMax-M2.5');
  await settingsDialog.locator('input[type=password]').fill('synthetic-test-key');
- await settingsDialog.getByRole('checkbox',{name:'在此设备记住密钥（可选）',exact:true}).check();
- await settingsDialog.getByRole('checkbox',{name:/我同意将当前对话范围/}).check();
+ await choose(settingsDialog.getByRole('checkbox',{name:'在此设备记住密钥（可选）',exact:true}));
+ await choose(settingsDialog.getByRole('checkbox',{name:/我同意将当前对话范围/}));
+ for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('settings '+width);await screenshot('settings-'+width);}
  await settingsDialog.getByRole('button',{name:'保存设置',exact:true}).click();await settingsDialog.waitFor({state:'hidden'});
  assert.equal((await request('ASSISTANT_SETTINGS_GET')).keyStorage,'local');
  pass('visible settings validate inline, cancel safely, and save explicit remember-key opt-in');
@@ -153,7 +160,7 @@ try {
  await page.getByRole('button',{name:'检查完全相同的 URL',exact:true}).click();
  const duplicateCard=page.locator('.duplicate-card');await duplicateCard.waitFor();
  assert.equal(await duplicateCard.getByRole('checkbox').count(),2);
- await duplicateCard.getByRole('checkbox',{name:'Synthetic Duplicate',exact:true}).check();
+ await choose(duplicateCard.getByRole('checkbox',{name:'Synthetic Duplicate',exact:true}));
  assert(await duplicateCard.getByRole('checkbox',{name:'Synthetic Guide',exact:true}).isDisabled());
  assert.equal((await native(id=>chrome.bookmarks.get(id),ids.duplicate)).length,1);
  await page.getByRole('button',{name:'预览移除 1 个重复书签',exact:true}).click();await approve(true);
@@ -161,7 +168,8 @@ try {
  await page.getByRole('button',{name:'检查完全相同的 URL',exact:true}).click();
  await page.getByText('当前范围没有完全相同的 URL，无需清理。',{exact:true}).waitFor();
  pass('inline duplicate selection keeps one copy; exact typed deletion gate and explicit zero-result state work');
- await browse();await page.getByRole('button',{name:'▸ Synthetic Target',exact:true}).click();
+ await browse();await page.getByRole('button',{name:'目录',exact:true}).click();
+ await page.getByRole('dialog',{name:'我的书签目录',exact:true}).getByText(ids.rootTitle,{exact:true}).click();
  await page.getByRole('button',{name:/整理书签/}).click();assert.equal(await page.locator('.duplicates-section').count(),0);
  await page.getByRole('button',{name:'目录',exact:true}).click();await page.getByRole('button',{name:'▤ 全部书签',exact:true}).click();
  pass('changing directory invalidates previous duplicate results');
@@ -195,7 +203,7 @@ try {
  let importDialog=page.getByRole('dialog',{name:'导入 JSON 备份',exact:true});
  const chooseBackup=async()=>{const chooser=page.waitForEvent('filechooser');await importDialog.getByRole('button',{name:/^(选择文件|更换文件)$/}).click();await(await chooser).setFiles(backupPath);await importDialog.locator('.preview-card').waitFor();};
  await chooseBackup();
- await importDialog.getByRole('checkbox',{name:/显示高级合并模式/}).check();await importDialog.getByRole('radio',{name:'受控合并',exact:true}).check();
+ await choose(importDialog.getByRole('checkbox',{name:/显示高级合并模式/}));await choose(importDialog.getByRole('radio',{name:'受控合并',exact:true}));
  await closeDialog(importDialog);await toolsDialog.getByRole('button',{name:'导入 JSON 备份',exact:true}).click();
  importDialog=page.getByRole('dialog',{name:'导入 JSON 备份',exact:true});await chooseBackup();
  assert(await importDialog.getByRole('radio',{name:'仅添加',exact:true}).isChecked());
@@ -203,7 +211,7 @@ try {
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('import '+width);await screenshot('import-'+width);}
  await importDialog.getByRole('button',{name:'创建计划',exact:true}).click();
  const importApprove=importDialog.getByRole('button',{name:'批准',exact:true});await importApprove.waitFor();assert(await importApprove.isDisabled());
- await importDialog.getByRole('checkbox',{name:'我已逐项核对并同意以上所有更改',exact:true}).check();await importApprove.click();
+ await choose(importDialog.getByRole('checkbox',{name:'我已逐项核对并同意以上所有更改',exact:true}));await importApprove.click();
  await importDialog.getByRole('button',{name:'执行',exact:true}).click();await importDialog.getByRole('button',{name:'关闭',exact:true}).waitFor();
  const recovered=await native(()=>chrome.bookmarks.getTree());const flatten=nodes=>nodes.flatMap(n=>[n,...flatten(n.children||[])]);
  const restoredSource=flatten(recovered).find(n=>n.title==='Synthetic Source');assert(restoredSource);const restoredNested=restoredSource.children.find(n=>n.title==='Synthetic Nested');
@@ -229,7 +237,7 @@ try {
  pass('visible provider error and cancellation preserve the prompt; retry completes successfully');
  // Selection scope freezes an explicitly selected native bookmark, independently of search text.
  await search('Synthetic Manual Edited');let scopedRow=page.locator('.results-panel tbody tr').filter({hasText:'Synthetic Manual Edited'});
- await scopedRow.getByRole('checkbox').check();await goal().fill('');await page.getByRole('button',{name:'AI 整理所选',exact:true}).click();
+ await choose(scopedRow.getByRole('checkbox'));await goal().fill('');await page.getByRole('button',{name:'AI 整理所选',exact:true}).click();
  await page.getByRole('button',{name:'询问 AI',exact:true}).click();await eventually(async()=>assert.equal(await goal().inputValue(),''));
  const scopeCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
  assert.equal(scopeCall.scope.bookmarkIds.length,1);assert.equal(scopeCall.bookmarks.length,1);assert.equal(scopeCall.bookmarks[0].title,'Synthetic Manual Edited');
