@@ -1,3 +1,4 @@
+import { executeWithIndexRefresh } from '../src/infrastructure/messaging/execution-refresh';
 import { registerWorkspaceHandlers, scopedBookmarks } from '../src/infrastructure/messaging/workspace-handlers';
 // entrypoints/background.ts
 //
@@ -243,7 +244,7 @@ export default defineBackground(() => {
       return { token: a.token, planId: a.planId, expiresAt: a.issuedAt + a.ttlMs };
     },
     executePlan: async (planId: string, token: string, dryRun?: boolean) => {
-      const r = await planService.execute(planId, token, dryRun ?? false);
+      const r = await executeWithIndexRefresh(() => planService.execute(planId, token, dryRun ?? false), () => coordinator.fullSync('manual'), dryRun ?? false);
       return r as { planId: string; status: string; succeeded: number; failed: number; compensated: number };
     },
     listPlans: async () => (await planService.listPlans()).sort((a,b) => b.createdAt-a.createdAt).map(p => ({planId:p.id,status:p.status,title:p.title,stepCount:p.steps.length,createdAt:p.createdAt})),

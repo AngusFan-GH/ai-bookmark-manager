@@ -312,6 +312,7 @@ defineExpose({ open: openModal });
 
       <!-- Step 4: Done -->
       <div v-else-if="step === 'done' && result" class="step-pane">
+        <el-alert v-if="result.syncWarning" :title="result.syncWarning" type="warning" :closable="false"/>
         <el-result
           :icon="result.failed === 0 ? 'success' : 'warning'"
           :title="planStatusLabel(result.status)"

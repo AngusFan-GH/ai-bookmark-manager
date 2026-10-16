@@ -225,9 +225,18 @@ try {
  assert.equal(await toolsDialog.locator('a[href^="javascript:"],a[href^="data:"]').count(),0);
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('health '+width);await screenshot('health-'+width);}
  await closeDialog(toolsDialog);pass('health leaves unsafe schemes nonclickable and fits four viewport sizes');
+ // Historical candidate IDs were deleted and restored under new IDs. Reusing that
+ // conversation must fail before transmitting its stale private history.
+ const callsBeforeStaleHistory=await worker.evaluate(()=>globalThis.__mockCalls.length);
+ await goal().fill('Continue after synthetic recovery');await page.getByRole('button',{name:'继续对话',exact:true}).click();
+ await page.locator('.main-pane > .el-alert').waitFor();
+ await eventually(async()=>assert(!(await goal().isDisabled())));
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeStaleHistory);
+ await goal().fill('');await page.getByRole('button',{name:'新任务',exact:true}).click();
+ pass('stale private conversation history is blocked before provider transmission; visible new-task action starts cleanly');
  // Provider failures and cancellation retain the user's prompt and allow a later successful retry.
  await worker.evaluate(()=>{globalThis.__mockMode='error';});await goal().fill('Synthetic retry request');
- await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await page.locator('.main-pane > .el-alert').waitFor();assert.equal(await goal().inputValue(),'Synthetic retry request');
+ await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await page.getByText('AI 请求暂时受限，请稍后重试，并检查服务账户的额度与调用频率。',{exact:true}).waitFor();assert.equal(await goal().inputValue(),'Synthetic retry request');
  const beforeCancelCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);
  await worker.evaluate(()=>{globalThis.__mockMode='wait';});await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();
  await eventually(async()=>assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),beforeCancelCalls+1));

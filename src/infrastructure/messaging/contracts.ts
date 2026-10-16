@@ -137,6 +137,7 @@ export type ExecuteRequest = {
 };
 
 export interface ExecuteResultMsg {
+  syncWarning?: string;
   planId: string;
   status: string;
   succeeded: number;

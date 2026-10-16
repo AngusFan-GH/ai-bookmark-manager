@@ -79,6 +79,7 @@ async function save() {
     const result = await request<ExecuteResultMsg>({ type: 'EXECUTE', requestId: id(), planId: plan.id, approvalToken: approval.token });
     if (result.status !== 'completed' || result.failed > 0 || result.succeeded !== 1) throw new Error('收藏未完成，请在工作台的操作历史中查看结果后再试。');
     saved.value = true;
+    if(result.syncWarning) error.value = result.syncWarning;
   } catch (e) { error.value = message(e); }
   finally { busy.value = false; }
 }
