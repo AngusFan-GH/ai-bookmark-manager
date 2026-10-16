@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildFolderTree, safeBookmarkHref, initialSearch, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, actionLabel, riskLabel, planStatusLabel, stepErrorLabel, stepStatusLabel, hasPlanExecutionResult } from '../../entrypoints/options/workspace-helpers';
+import { buildFolderTree, safeBookmarkHref, initialSearch, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, actionLabel, riskLabel, planStatusLabel, stepErrorLabel, stepStatusLabel, hasPlanExecutionResult, folderDisplayPath } from '../../entrypoints/options/workspace-helpers';
+import { flattenTree } from '../../src/domain/bookmarks/normalize';
 import type { FolderRecord } from '../../src/domain/bookmarks/types';
 const folder = (id:string,parentId:string|null,index=0):FolderRecord => ({id,browserId:id,parentId,index,title:id,path:'untrusted cached path',updatedAt:0,syncGeneration:0});
 describe('workspace presentation boundaries', () => {
@@ -86,5 +87,23 @@ describe('plan-bound execution completion',()=>{
   it('recognizes terminal history results without local execution state',()=>{
     for(const status of ['completed','partially_completed','failed']) expect(hasPlanExecutionResult({id:'history',status},new Set())).toBe(true);
     for(const status of ['draft','validated','approved','executing','cancelled']) expect(hasPlanExecutionResult({id:'other',status},new Set())).toBe(false);
+  });
+});
+
+describe('normalized folder display paths',()=>{
+  it('does not append a folder title already present in normalized paths',()=>{
+    const {folders}=flattenTree([{id:'0',title:'',children:[{id:'1',parentId:'0',title:'Bookmarks bar',children:[{id:'2',parentId:'1',title:'Synthetic Target',children:[]}]}]}],{now:1,generation:1});
+    const target=folders.find(f=>f.id==='2')!;
+    expect(target.path).toBe('Bookmarks bar / Synthetic Target');
+    expect(folderDisplayPath(target)).toBe('Bookmarks bar / Synthetic Target');
+    const create={id:'new-folder',action:'create',riskLevel:'low',parentBrowserId:'2',expectedBefore:{},desiredAfter:{title:'Synthetic AI Folder'}} as unknown as import('../../src/domain/operations/types').OperationStep;
+    const move={id:'move',action:'move',riskLevel:'medium',parentStepId:'new-folder',expectedBefore:{title:'Source',parentId:'1'},desiredAfter:{}} as unknown as import('../../src/domain/operations/types').OperationStep;
+    expect(describePlanStep(create,[create,move],folders,[]).targetPath).toBe('Bookmarks bar / Synthetic Target / Synthetic AI Folder');
+    expect(describePlanStep(move,[create,move],folders,[]).targetPath).toBe('Bookmarks bar / Synthetic Target / Synthetic AI Folder（新建）');
+  });
+  it('falls back only when a normalized path is empty or unavailable',()=>{
+    expect(folderDisplayPath({path:'',title:'Bookmarks bar'})).toBe('Bookmarks bar');
+    expect(folderDisplayPath({path:'',title:''})).toBe('根目录');
+    expect(folderDisplayPath(undefined)).toBe('目录名称不可用');
   });
 });

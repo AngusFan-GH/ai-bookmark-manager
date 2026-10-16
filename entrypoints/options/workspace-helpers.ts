@@ -54,9 +54,13 @@ import type { OperationStep, OperationAction, RiskLevel } from '../../src/domain
 export const actionLabel = (action: OperationAction): string => ({create:'新建',move:'移动',delete:'删除',rename:'重命名',update:'更新'}[action]);
 export const riskLabel = (risk: RiskLevel): string => ({low:'低风险',medium:'中风险',high:'高风险'}[risk]);
 export const planStatusLabel = (status: string): string => ({draft:'待审核',validated:'已验证',approved:'已批准',executing:'执行中',completed:'已完成',partially_completed:'部分完成',failed:'执行失败',cancelled:'已取消'}[status] ?? status);
+/** Normalized folder paths already include the folder's own title. */
+export function folderDisplayPath(folder: Pick<FolderRecord,'path'|'title'> | undefined): string {
+  return folder ? folder.path || folder.title || '根目录' : '目录名称不可用';
+}
 export function describePlanStep(step: OperationStep, steps: OperationStep[], folders: FolderRecord[], bookmarks: Array<{id:string;title:string;url?:string;path:string}>) {
   const text = (value:unknown) => typeof value === 'string' ? value : '';
-  const folderPath = (id:string) => {const folder=folders.find(item=>item.id===id);return folder ? [folder.path,folder.title].filter(Boolean).join(' / ') : '目录名称不可用';};
+  const folderPath = (id:string) => folderDisplayPath(folders.find(item=>item.id===id));
   const record=bookmarks.find(item=>item.id===step.targetBrowserId);
   const sourceTitle=text(step.expectedBefore.title)||record?.title||'未命名书签';
   const sourceUrl=text(step.expectedBefore.url)||record?.url||'';

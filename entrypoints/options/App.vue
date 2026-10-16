@@ -6,7 +6,7 @@ import * as workspace from '../../src/workspace-client';
 import type { BookmarkRecord } from '../../src/domain/bookmarks/types';
 import type { OperationPlan } from '../../src/domain/operations/types';
 import type { AssistantMode } from '../../src/domain/assistant/types';
-import { buildFolderTree, safeBookmarkHref, initialSearch, downloadableJson, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel, hasPlanExecutionResult } from './workspace-helpers';
+import { buildFolderTree, safeBookmarkHref, initialSearch, downloadableJson, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel, hasPlanExecutionResult, folderDisplayPath } from './workspace-helpers';
 import LegacyTools from './LegacyTools.vue';
 type SessionView = workspace.AssistantSessionView;
 const store = useBookmarkStore();
@@ -27,7 +27,7 @@ const moves = computed(() => focusedAssistant.value?.moves ?? []);
 const selectedMoves = ref<string[]>([]);
 watch(focusedAssistant,()=>{selectedMoves.value=moves.value.map(m=>m.bookmarkId);plan.value=undefined;});
 watch(selectedMoves,()=>{plan.value=undefined;});
-function moveDestination(id:string) {const proposed=focusedAssistant.value?.folders?.find(f=>f.proposalId===id);if(proposed){const parent=store.folders.find(f=>f.id===proposed.parentFolderId);return `${parent?.path ? parent.path+' / ' : ''}${parent?.title||'目录'} / ${proposed.title}（新建）`;}const folder=store.folders.find(f=>f.id===id);return folder?`${folder.path ? folder.path+' / ':''}${folder.title}`:id;}
+function moveDestination(id:string) {const proposed=focusedAssistant.value?.folders?.find(f=>f.proposalId===id);if(proposed){const parent=store.folders.find(f=>f.id===proposed.parentFolderId);return `${folderDisplayPath(parent)} / ${proposed.title}（新建）`;}return folderDisplayPath(store.folders.find(f=>f.id===id));}
 function bookmarkTitle(id:string){return store.rows.find(b=>b.id===id)?.title||session.value?.citations?.find(c=>c.bookmarkId===id)?.title||`书签 ${id}`;}
 const planCards=computed(()=>(plan.value?.steps??[]).map(step=>({step,view:describePlanStep(step,plan.value?.steps??[],store.folders,[...store.rows,...(session.value?.citations??[]).map(c=>({id:c.bookmarkId,title:c.title,url:c.url,path:c.path}))])})));
 const executionCounts=computed(()=>({succeeded:plan.value?.steps.filter(s=>s.status==='succeeded').length??0,failed:plan.value?.steps.filter(s=>s.status==='failed').length??0,compensated:plan.value?.steps.filter(s=>s.status==='compensated').length??0,skipped:plan.value?.steps.filter(s=>s.status==='skipped').length??0}));

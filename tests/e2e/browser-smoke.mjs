@@ -101,7 +101,8 @@ try {
  const download=await downloadPromise; const backupPath=path.join(artifactDir,'synthetic-plan-backup.json'); await download.saveAs(backupPath);
  const backup=JSON.parse(await readFile(backupPath,'utf8')); assert.equal(backup.formatVersion,1); assert(!JSON.stringify(backup).includes('synthetic-test-key'));
  assert(await execute.isDisabled());
- await page.getByRole('checkbox',{name:'2. 已保存备份，逐项核对并批准以上更改',exact:true}).check();
+ await page.locator('.approval-box label.el-checkbox').click();
+ assert(await page.getByRole('checkbox',{name:'2. 已保存备份，逐项核对并批准以上更改',exact:true}).isChecked());
  await execute.click(); await page.getByText('本计划已执行。请查看操作历史；如需重试，请创建并审核新计划。',{exact:true}).waitFor();
  const movedGuide=(await native(id=>chrome.bookmarks.get(id),ids.guide))[0];
  const createdFolder=(await native(id=>chrome.bookmarks.get(id),movedGuide.parentId))[0];
@@ -112,12 +113,14 @@ try {
  await page.getByRole('button',{name:'浏览与引用',exact:true}).click();
  await page.getByRole('textbox',{name:'搜索原生书签',exact:true}).fill('Synthetic Duplicate');
  await page.waitForFunction(()=>document.querySelectorAll('.el-table__body-wrapper tbody tr').length===1 && document.querySelector('.el-table__body-wrapper tbody')?.textContent.includes('Synthetic Duplicate'));
- await page.locator('.el-table__body-wrapper').getByRole('checkbox').check();
+ await page.locator('.el-table__body-wrapper label.el-checkbox').click();
+ assert(await page.locator('.el-table__body-wrapper').getByRole('checkbox').isChecked());
  await page.getByRole('button',{name:'预览删除',exact:true}).click();
  await page.locator('.approval-box').waitFor(); assert(await execute.isDisabled());
  const deleteDownload=page.waitForEvent('download'); await page.getByRole('button',{name:'1. 导出此计划的恢复备份',exact:true}).click();
  await (await deleteDownload).saveAs(path.join(artifactDir,'synthetic-delete-backup.json'));
- await page.getByRole('checkbox',{name:'2. 已保存备份，逐项核对并批准以上更改',exact:true}).check();
+ await page.locator('.approval-box label.el-checkbox').click();
+ assert(await page.getByRole('checkbox',{name:'2. 已保存备份，逐项核对并批准以上更改',exact:true}).isChecked());
  assert(await execute.isDisabled()); await page.getByPlaceholder('删除',{exact:true}).fill('删除');
  await execute.click(); await page.getByText('本计划已执行。请查看操作历史；如需重试，请创建并审核新计划。',{exact:true}).waitFor();
  assert.equal(await native(async id=>{try{await chrome.bookmarks.get(id);return true;}catch{return false;}},ids.duplicate),false);

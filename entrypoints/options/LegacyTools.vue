@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { folderDisplayPath } from './workspace-helpers';
 import { ElMessage } from 'element-plus';
 import { useBookmarkStore } from '../../src/store';
 import { request } from '../../src/client';
@@ -148,7 +149,7 @@ onMounted(async () => {
       <el-tab-pane label="书签" name="bookmarks">
         <el-card shadow="never" class="main">
           <div class="toolbar"><el-input v-model="query" clearable placeholder="搜索标题、URL、目录路径" style="max-width:420px"/>
-            <el-select v-model="folderId" filterable style="width:300px" placeholder="选择目录"><el-option label="全部目录" value=""/><el-option v-for="f in folders" :key="f.id" :value="f.id" :label="`${f.path ? f.path + ' / ' : ''}${f.title}`"/></el-select>
+            <el-select v-model="folderId" filterable style="width:300px" placeholder="选择目录"><el-option label="全部目录" value=""/><el-option v-for="f in folders" :key="f.id" :value="f.id" :label="folderDisplayPath(f)"/></el-select>
           </div>
           <el-alert v-if="store.error" :title="store.error" type="error" show-icon :closable="false"/>
           <el-table :data="store.rows" v-loading="store.loading" stripe height="min(60vh,650px)" row-key="id">
