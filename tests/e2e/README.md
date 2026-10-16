@@ -5,8 +5,10 @@ Run from repository root with Node 20+:
 ```sh
 npm run build
 npx playwright install --with-deps chromium
-npm run test:browser
+E2E_HEADED=1 PW_CHROMIUM_ATTACH_TO_OTHER=1 xvfb-run -a npm run test:browser
 ```
+
+CI uses headed Chromium under Xvfb so native extension chrome is present. The pinned Playwright implementation requires `PW_CHROMIUM_ATTACH_TO_OTHER=1` to attach extension action popup targets classified as CDP `other`; this is a runner-only setting, not an application modification. Target discovery is retained in `popup-targets.json`. Set `E2E_HEADED=1` on a desktop with a display, or use the Xvfb command above on Linux. Omit it for headless diagnostic runs; native action popup support is not assumed there.
 
 Use `CHROMIUM_PATH` for a specific Chromium binary, never an existing browser profile. Artifacts default to `/tmp/bookmark-e2e-artifacts`; override with `E2E_ARTIFACT_DIR`.
 

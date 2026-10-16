@@ -22,7 +22,7 @@ const duplicateSelection=ref<string[]>([]); const duplicatesChecked=ref(false); 
 const messagesElement=ref<HTMLElement>(); const followMessages=ref(true); const canceling=ref(false);
 const scopeName=computed(()=>scopeLabel(session.value?.scope??prospectiveScope.value));
 const prospectiveScope=computed<AssistantScope>(()=>scopeChoice.value==='selected'?{bookmarkIds:scopeSelection.value.map(b=>b.id)}:scopeChoice.value==='folder'&&folderId.value?{folderId:folderId.value}:{});
-function scopeLabel(scope:AssistantScope){const label=scope.bookmarkIds?.length?`所选 ${scope.bookmarkIds.length} 个书签`:scope.folderId?folderDisplayPath(store.folders.find(f=>f.id===scope.folderId)):'全部书签';return scope.query?`${label} · 对话筛选：${scope.query}`:label;}
+function scopeLabel(scope:AssistantScope){const label=scope.bookmarkIds!==undefined?`所选 ${scope.bookmarkIds.length} 个书签`:scope.folderId?folderDisplayPath(store.folders.find(f=>f.id===scope.folderId)):'全部书签';return scope.query?`${label} · 对话筛选：${scope.query}`:label;}
 const scopeDiffers=computed(()=>!!session.value&&JSON.stringify(session.value.scope)!==JSON.stringify(prospectiveScope.value));
 const locked=computed(()=>busy.value||sending.value||contentPending.value||requestingAdvice.value);
 const initialBookmark=ref<{title:string;url:string}>();const bookmarkAdvice=ref<workspace.BookmarkAdvice>();const requestingAdvice=ref(false);const editorError=ref('');

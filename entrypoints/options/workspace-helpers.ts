@@ -66,7 +66,7 @@ export function describePlanStep(step: OperationStep, steps: OperationStep[], fo
   const sourceTitle=text(step.expectedBefore.title)||record?.title||'未命名书签';
   const sourceUrl=text(step.expectedBefore.url)||record?.url||'';
   const sourceParent=text(step.expectedBefore.parentId);
-  const sourcePath=text(step.expectedBefore.path)||record?.path||(sourceParent?folderPath(sourceParent):'根目录');
+  const sourcePath=text(step.expectedBefore.path)||(sourceParent?folderPath(sourceParent):record?.path||'根目录');
   const createdParent=step.parentStepId?steps.find(item=>item.id===step.parentStepId):undefined;
   const parentPath=createdParent ? `${folderPath(createdParent.parentBrowserId||'')} / ${text(createdParent.desiredAfter.title)}（新建）` : step.parentBrowserId?folderPath(step.parentBrowserId):sourcePath;
   return {action:actionLabel(step.action),risk:riskLabel(step.riskLevel),sourceTitle,sourceUrl,sourcePath,

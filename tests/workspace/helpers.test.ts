@@ -150,3 +150,10 @@ it('shows new bookmarks in their parent folder without appending the bookmark ti
  const view=describePlanStep(step,[step],[{...folder('bar',null),path:'Bookmarks bar'}],[]);
  expect(view.targetPath).toBe('Bookmarks bar');expect(view.targetTitle).toBe('Learn Vue');expect(view.targetUrl).toBe('https://vuejs.org/?original=YES#intro');
 });
+
+it('keeps the captured source directory after live records move to their new location',()=>{
+ const step={id:'moved',action:'move',riskLevel:'medium',targetBrowserId:'bookmark',parentBrowserId:'destination',expectedBefore:{title:'Original title',url:'https://example.test/original',parentId:'source'},desiredAfter:{}} as unknown as import('../../src/domain/operations/types').OperationStep;
+ const folders=[{...folder('source',null),path:'Source / Nested'},{...folder('destination',null),path:'Destination'}];
+ const current=[{id:'bookmark',title:'Current title',url:'https://example.test/current',path:'Destination'}];
+ expect(describePlanStep(step,[step],folders,current)).toMatchObject({sourceTitle:'Original title',sourceUrl:'https://example.test/original',sourcePath:'Source / Nested',targetPath:'Destination'});
+});

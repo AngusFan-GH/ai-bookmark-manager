@@ -59,7 +59,14 @@ async function choose(input, checked=true) {
  if(await input.isChecked() !== checked) await input.locator('xpath=ancestor::label[1]').click();
  assert.equal(await input.isChecked(),checked,'Visible label must update native checked state');
 }
-async function screenshot(name) {await page.screenshot({path:path.join(artifactDir,name+'.png'),fullPage:true});}
+async function screenshot(name) {
+ // Capture stable product UI, not the opening modal transition or a fading toast.
+ await page.evaluate(async()=>{
+  await Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished.catch(()=>{})));
+ });
+ await eventually(async()=>assert.equal(await page.locator('.el-message:visible').count(),0));
+ await page.screenshot({path:path.join(artifactDir,name+'.png'),fullPage:true,animations:'disabled'});
+}
 async function noBodyOverflow(label) {
  const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,width:innerWidth}));
  assert(dimensions.scroll<=dimensions.width+1,`${label}: unexpected page horizontal overflow ${JSON.stringify(dimensions)}`);
@@ -67,7 +74,7 @@ async function noBodyOverflow(label) {
 
 try {
  context = await chromium.launchPersistentContext(path.join(temp,'profile'), {
-  ...(process.env.CHROMIUM_PATH ? {executablePath:process.env.CHROMIUM_PATH} : {channel:'chromium'}), headless:true,
+  ...(process.env.CHROMIUM_PATH ? {executablePath:process.env.CHROMIUM_PATH} : {channel:'chromium'}), headless:process.env.E2E_HEADED !== '1',
   args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--disable-dev-shm-usage','--disable-background-networking'],
   viewport:{width:1440,height:1000},acceptDownloads:true,
  });
@@ -262,9 +269,14 @@ try {
  pass('sidepanel document loads the complete workspace without horizontal overflow');
  // Opening popup.html as a tab cannot reproduce Chrome's activeTab grant. Use the real extension action popup.
  const sourcePage=await context.newPage();await sourcePage.goto('https://example.test/capture?Keep=YES#frag');await sourcePage.bringToFront();
- const popupPromise=context.waitForEvent('page',{timeout:10000});
+ const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
  await worker.evaluate(()=>chrome.action.openPopup());
- const popup=await popupPromise;popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();
+ const cdp=await context.newCDPSession(sourcePage);
+ const targets=await cdp.send('Target.getTargets');
+ await writeFile(path.join(artifactDir,'popup-targets.json'),JSON.stringify({headed:process.env.E2E_HEADED==='1',targets},null,2));
+ console.log('Popup target diagnostics:',JSON.stringify(targets));
+ const popup=await popupPromise;
+ assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();
  await popup.getByLabel('标题',{exact:true}).fill('Synthetic Quick Save');
  await popup.getByRole('button',{name:'确认收藏',exact:true}).click();await popup.getByRole('button',{name:'✓ 已收藏',exact:true}).waitFor();
  await popup.getByRole('searchbox',{name:'搜索已有书签',exact:true}).fill('Synthetic Quick Save');
