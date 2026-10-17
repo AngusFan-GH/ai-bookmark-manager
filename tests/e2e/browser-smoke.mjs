@@ -71,10 +71,10 @@ globalThis.fetch = async (url, init) => {
 };
 `;
 await writeFile(background,mock+await readFile(background,'utf8'));
-let context; let page; let worker; const checks=[]; const errors=[];
+let context; let page; let worker; const checks=[]; const errors=[]; const captureErrors=[];
 let currentStage='launch isolated browser';
 const startedAt=Date.now();
-const report = extra => ({checks,errors,currentStage,elapsedMs:Date.now()-startedAt,syntheticOnly:true,mockProvider:true,liveProviderTested:false,...extra});
+const report = extra => ({checks,errors,captureErrors,currentStage,elapsedMs:Date.now()-startedAt,syntheticOnly:true,mockProvider:true,liveProviderTested:false,...extra});
 const checkpoint = name => {
  currentStage=name;console.log('STAGE',name);
  writeFileSync(path.join(artifactDir,'progress.json'),JSON.stringify(report({status:'running'}),null,2));
@@ -109,25 +109,29 @@ async function choose(input, checked=true) {
 }
 async function screenshot(name,target=page,fullPage=true) {
  checkpoint('screenshot: '+name);
- // Poll state rather than awaiting Animation.finished: paused/idle animations
- // need never resolve. Do not mutate animations while Chromium captures a
- // resizing dialog; that caused transient Page.captureScreenshot failures.
- await target.waitForFunction(()=>document.getAnimations().every(animation=>
-  animation.playState!=='running'||animation.effect?.getTiming().iterations===Infinity),{},{timeout:5000});
+ // Screenshots are evidence, not a frame-scheduler assertion. Headed extension
+ // pages can throttle requestAnimationFrame after resizing. Rely on the explicit
+ // UI/geometry assertions, then take an ordinary bounded capture without
+ // changing animation state or waiting for renderer frame callbacks.
  await eventually(async()=>assert.equal(await target.locator('.el-message:visible').count(),0));
- const settle=()=>bounded(target.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())))),2000,'screenshot render frames');
- await settle();
  try {
   await target.screenshot({path:path.join(artifactDir,name+'.png'),fullPage,timeout:10000});
  } catch(error) {
-  if(!String(error).includes('Page.captureScreenshot): Unable to capture screenshot'))throw error;
-  // One retry for this specific browser capture race; failed assertions and
-  // missing UI are never retried or suppressed here.
-  console.warn('Retrying transient screenshot capture:',name);
-  await writeFile(path.join(artifactDir,name+'-capture-retry.json'),JSON.stringify({name,error:String(error)},null,2));
-  await settle();
-  await target.screenshot({path:path.join(artifactDir,name+'.png'),fullPage,timeout:10000});
+  let captureError=error;
+  if(String(error).includes('Page.captureScreenshot): Unable to capture screenshot')) {
+   // Retry exactly this transient capture race once. Functional assertions are
+   // outside this helper and are never suppressed by capture error handling.
+   console.warn('Retrying transient screenshot capture:',name);
+   await writeFile(path.join(artifactDir,name+'-capture-retry.json'),JSON.stringify({name,error:String(error)},null,2));
+   await new Promise(resolve=>setTimeout(resolve,150));
+   try {await target.screenshot({path:path.join(artifactDir,name+'.png'),fullPage,timeout:10000});return;}
+   catch(retryError){captureError=retryError;}
+  }
+  captureErrors.push({name,error:String(captureError)});
+  await writeFile(path.join(artifactDir,'capture-errors.json'),JSON.stringify(captureErrors,null,2));
+  console.error('Screenshot unavailable; continuing functional assertions:',name,String(captureError));
  }
+
 }
 
 async function noBodyOverflow(label) {
@@ -146,6 +150,19 @@ async function reachable(locator, label) {
   });
   assert(state.left>=0&&state.right<=state.width+1&&state.top>=0&&state.bottom<=state.height+1&&state.hit,`${label}: control clipped or covered ${JSON.stringify(state)}`);
  });
+}
+async function openNativePopupFor(sourcePage) {
+  checkpoint('open native action popup');
+  await sourcePage.bringToFront();
+  const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
+  if(process.env.E2E_NATIVE_POPUP==='shortcut') await execFileAsync('xdotool',['key','--clearmodifiers','ctrl+shift+y']);
+  else await worker.evaluate(()=>chrome.action.openPopup());
+  const cdp=await context.newCDPSession(sourcePage);const targets=await cdp.send('Target.getTargets');
+  await writeFile(path.join(artifactDir,'popup-targets.json'),JSON.stringify({headed:process.env.E2E_HEADED==='1',nativePopup:process.env.E2E_NATIVE_POPUP??'openPopup',targets},null,2));
+  await cdp.detach();
+  const popup=await popupPromise;
+  assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);
+  popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();return popup;
 }
 async function nativePopupLayout(popup,label) {
  // Observe browser-managed action-window size. Never emulate a viewport on a
@@ -258,21 +275,26 @@ try {
  await page.getByRole('button',{name:'AI 设置',exact:true}).click();
  let settingsDialog=page.getByRole('dialog',{name:'AI 连接与数据范围',exact:true});
  const model=()=>settingsDialog.locator('.el-form-item').filter({hasText:'模型'}).getByRole('textbox');
+ const advancedSettings=async open=>{
+  const details=settingsDialog.locator('.privacy-settings');
+  if(await details.evaluate(element=>element.open)!==open)await details.locator('summary').click();
+ };
+ await advancedSettings(true);
  await model().fill('');await settingsDialog.getByRole('button',{name:'保存设置',exact:true}).click();
  await settingsDialog.getByText('请输入模型名称。',{exact:true}).waitFor();
  await settingsDialog.getByRole('button',{name:'取消',exact:true}).click();
  assert.equal((await request('ASSISTANT_SETTINGS_GET')).hasKey,false);
  await page.getByRole('button',{name:'AI 设置',exact:true}).click();
- await model().fill('MiniMax-M2.5');
+ await advancedSettings(true);await model().fill('MiniMax-M2.5');await advancedSettings(false);
  await settingsDialog.locator('input[type=password]').fill('synthetic-test-key');
  await choose(settingsDialog.getByRole('checkbox',{name:'在此设备记住密钥（可选）',exact:true}));
  await choose(settingsDialog.getByRole('checkbox',{name:/我同意将当前对话范围/}));
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('settings '+width);await settingsFooter(settingsDialog,'settings '+width);await screenshot('settings-'+width);}
  await page.setViewportSize({width:390,height:600});
- await settingsDialog.locator('.privacy-settings summary').click();
+ await advancedSettings(true);
  await settingsDialog.locator('.el-input-number').scrollIntoViewIfNeeded();
  await settingsFooter(settingsDialog,'advanced settings 390x600');await screenshot('settings-advanced-390x600');
- await settingsDialog.locator('.privacy-settings summary').click();
+ await advancedSettings(false);
  await page.setViewportSize({width:1440,height:1000});
  pass('settings footer remains on screen with independently scrolling advanced options at 390x600');
  await choose(settingsDialog.getByRole('checkbox',{name:'自动提供 AI 建议',exact:true}));
@@ -283,6 +305,21 @@ try {
  assert.equal(connectionCalls.length,1);assert.deepEqual(connectionCalls[0].messages,[{role:'user',content:'Reply with OK.'}]);
  assert.equal((await request('ASSISTANT_SETTINGS_GET')).keyStorage,'local');
  pass('settings reopen after skip, validate inline, cancel safely, and test connectivity with a fixed bookmark-free prompt');
+ checkpoint('priority native popup sizing smoke');
+ const earlySource=await context.newPage();await earlySource.goto('about:blank');
+ const earlyUnavailable=await openNativePopupFor(earlySource);
+ await earlyUnavailable.getByText('这个页面无法快捷收藏。请在普通网页中打开扩展。',{exact:true}).waitFor();
+ await nativePopupLayout(earlyUnavailable,'priority-popup-unavailable');
+ await screenshot('priority-popup-unavailable',earlyUnavailable,false);
+ await earlyUnavailable.close();
+ await earlySource.goto('https://example.test/early-capture');
+ const earlyValid=await openNativePopupFor(earlySource);
+ await earlyValid.getByRole('button',{name:'采用标题',exact:true}).waitFor();
+ await nativePopupLayout(earlyValid,'priority-popup-valid');
+ await screenshot('priority-popup-valid',earlyValid,false);
+ assert.equal((await native(()=>chrome.bookmarks.search({url:'https://example.test/early-capture'}))).length,0);
+ await earlyValid.close();await earlySource.close();await page.bringToFront();
+ pass('priority native popup retains readable browser-managed width for unsupported and valid pages without saving');
  checkpoint('automatic guidance cancellation and scope');
  // Exercise automatic guidance separately, then isolate the existing manual journeys.
  const configuredSettings=await request('ASSISTANT_SETTINGS_GET');
@@ -478,19 +515,7 @@ try {
  await request('ASSISTANT_SETTINGS_SAVE',{settings:{...await request('ASSISTANT_SETTINGS_GET'),autoSuggestions:true}});
  // Opening popup.html as a tab cannot reproduce Chrome's activeTab grant. Use the real extension action popup.
  const sourcePage=await context.newPage();await sourcePage.goto('https://example.test/capture?Keep=YES#frag');await sourcePage.bringToFront();
- const openNativePopup=async()=>{
-  checkpoint('open native action popup');
-  await sourcePage.bringToFront();
-  const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
-  if(process.env.E2E_NATIVE_POPUP==='shortcut') await execFileAsync('xdotool',['key','--clearmodifiers','ctrl+shift+y']);
-  else await worker.evaluate(()=>chrome.action.openPopup());
-  const cdp=await context.newCDPSession(sourcePage);const targets=await cdp.send('Target.getTargets');
-  await writeFile(path.join(artifactDir,'popup-targets.json'),JSON.stringify({headed:process.env.E2E_HEADED==='1',nativePopup:process.env.E2E_NATIVE_POPUP??'openPopup',targets},null,2));
-  await cdp.detach();
-  const popup=await popupPromise;
-  assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);
-  popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();return popup;
- };
+ const openNativePopup=()=>openNativePopupFor(sourcePage);
  // Exercise an unsupported page first: the minimal initial content must not
  // collapse native autosizing before a later valid-page capture opens.
  await sourcePage.goto('about:blank');
@@ -569,6 +594,7 @@ try {
  pass('native lookup retry recovers inline advice without saving a bookmark');
  pass('failed native capture lookup pauses automatic advice instead of treating unknown status as a new bookmark');
  assert.deepEqual(errors,[]);pass('no uncaught workspace page errors');
+ assert.deepEqual(captureErrors,[],'Functional checks completed but visual evidence is incomplete; see capture-errors.json');
  await writeFile(path.join(artifactDir,'report.json'),JSON.stringify(report({status:'passed'}),null,2));
  console.log(`Artifacts: ${artifactDir}`);
 } catch(error) {
