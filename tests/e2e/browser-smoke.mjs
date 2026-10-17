@@ -135,7 +135,10 @@ async function screenshot(name,target=page,fullPage=true) {
 }
 
 async function noBodyOverflow(label) {
- const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,width:innerWidth}));
+ const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,width:innerWidth,
+  overflowing:[...document.querySelectorAll('body *')].map(element=>{const r=element.getBoundingClientRect();return {tag:element.tagName,className:String(element.className),left:r.left,right:r.right,width:r.width};}).filter(element=>element.width>0&&(element.right>innerWidth+1||element.left< -1)).slice(0,30),
+ }));
+ if(dimensions.scroll>dimensions.width+1)await writeFile(path.join(artifactDir,'overflow-'+label.replace(/[^a-z0-9]+/gi,'-')+'.json'),JSON.stringify(dimensions,null,2));
  assert(dimensions.scroll<=dimensions.width+1,`${label}: unexpected page horizontal overflow ${JSON.stringify(dimensions)}`);
 }
 
@@ -270,6 +273,18 @@ try {
  await search('Synthetic Guide');
  await page.waitForTimeout(1100);assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),0);
  pass('local search after skipped setup remains usable and never calls an unconfigured provider');
+ checkpoint('utility menu responsive bounds');
+ const utilityMenu=page.locator('.utility-menu');
+ if(!await utilityMenu.evaluate(element=>element.open))await utilityMenu.locator('summary').click();
+ for(const width of [390,520,768,1024,1440]) {
+  await page.setViewportSize({width,height:1000});
+  await noBodyOverflow('utility-menu '+width);
+  await reachable(utilityMenu.getByRole('button',{name:'历史与恢复',exact:true}),'utility first action '+width);
+  await reachable(utilityMenu.getByRole('button',{name:'刷新原生书签',exact:true}),'utility last action '+width);
+  if(width===768)await screenshot('utility-menu-768');
+ }
+ await utilityMenu.locator('summary').click();
+ pass('open utility menu stays fully reachable without horizontal overflow at five viewport widths');
  checkpoint('settings validation and connection');
  // Settings are entered visibly, with model validation, cancellation and explicit local opt-in.
  await page.getByRole('button',{name:'AI 设置',exact:true}).click();
