@@ -30,3 +30,7 @@ Results in the job log and step summary contain only fixed phase/status identifi
 ## Offline checks
 
 `npm test` includes the harness tests, but never runs a live request. Tests verify gate denials, the five-call bound, real SSE decoding, incremental service callbacks, history wiring and ID parsing, rejection of truncated/nonincremental/JSON-fallback responses, stop-on-failure behavior, no SSE metric buffering, and allowlisted reporting. The old v1 push marker is no longer accepted. `node tests/live/run-minimax.mjs` is the dedicated Actions entry point; outside the explicit gate it fails closed without contacting MiniMax. No local key is needed or should be requested.
+
+## Safe protocol diagnosis
+
+The live-only transport tap forwards original SSE byte chunks without cloning, buffering the complete response, or changing production acceptance. Reports retain counts and at most eight frame-shape records with fixed enum values: choice-list size category, zero/missing/other index, delta shape, message/usage/error presence, stop/length/other finish, DONE and EOF/cancellation. Unknown values map to `other`; content, reasoning, arbitrary field names and error text are never retained. Diagnostic parsing is capped at 256,000 pending characters and 10,000 frames, without relaxing provider validation. Cancellation after a clean DONE is normal; counters describe what was observed before cancellation.

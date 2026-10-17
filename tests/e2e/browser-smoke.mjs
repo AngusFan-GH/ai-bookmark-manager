@@ -518,6 +518,10 @@ try {
  assert.equal(scopeCall.scope.bookmarkIds.length,1);assert.equal(scopeCall.bookmarks.length,1);assert.equal(scopeCall.bookmarks[0].title,'Synthetic Manual Edited');
  pass('selected-bookmark AI task transmits exactly the frozen selection, not all search results');
  await browse();await search('');
+ // The product debounces local filtering by 200ms. Await the actual complete
+ // result set before responsive evidence, rather than capturing old filtered rows.
+ const clearedResults=await request('BOOKMARKS_LIST',{query:'',limit:200,offset:0});
+ await eventually(async()=>assert.equal(await page.locator('.results-panel tbody tr').count(),clearedResults.rows.length));
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('workspace '+width);await page.locator('.goal-form').scrollIntoViewIfNeeded();await reachable(page.getByRole('button',{name:'本地搜索',exact:true}),'local search '+width);await screenshot('workspace-'+width);}
  await goal().focus();await page.keyboard.type('Synthetic Guide');await page.getByRole('button',{name:'本地搜索',exact:true}).click();
  await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();await page.keyboard.press('Tab');assert(await page.evaluate(()=>document.activeElement!==document.body));

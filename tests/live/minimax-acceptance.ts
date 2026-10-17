@@ -1,3 +1,4 @@
+import { newSseDiagnostics, tapSseDiagnostics, type SseDiagnostics } from './sse-diagnostics';
 import { createMiniMaxProvider, MINIMAX_ENDPOINTS, DEFAULT_MINIMAX_MODEL } from '../../src/domain/assistant/provider';
 import { createAssistantService } from '../../src/domain/assistant/service';
 import { AssistantError, type AssistantRepository, type AssistantSession } from '../../src/domain/assistant/types';
@@ -13,7 +14,7 @@ export function liveGate(env: Record<string, string | undefined>): boolean {
 }
 type Phase = 'connection' | 'recommendation' | 'multi-turn' | 'organization' | 'bookmark-advice';
 type Failure = 'assertion' | 'validation' | 'provider' | 'canceled' | 'timeout' | 'busy' | 'conflict' | 'not-found' | 'limit' | 'unexpected';
-export interface CallMetric { call: number; httpStatus?: number; latencyMs: number; promptTokens?: number; completionTokens?: number; totalTokens?: number; streamRequested: boolean; sseContentType?: boolean; stopValidated?: boolean; previewCallbacks?: number; firstPreviewMs?: number; incrementalPreview?: boolean }
+export interface CallMetric { call: number; httpStatus?: number; latencyMs: number; promptTokens?: number; completionTokens?: number; totalTokens?: number; streamRequested: boolean; sseContentType?: boolean; stopValidated?: boolean; previewCallbacks?: number; firstPreviewMs?: number; incrementalPreview?: boolean; sseDiagnostics?: SseDiagnostics }
 export interface LiveReport { schema: 2; provider: 'MiniMax'; region: 'cn'; model: string; maxCalls: number; maxCompletionTokens: number; passed: boolean; checks: { phase: Phase; passed: boolean; failure?: Failure }[]; calls: CallMetric[] }
 // Never serialize exception messages, headers, prompts, response bodies, reasoning or keys.
 export function safeFailure(error: unknown): Failure {
@@ -38,8 +39,9 @@ export async function runLiveAcceptance(apiKey: string, fetcher: typeof fetch = 
       metric.httpStatus = response.status;
       if (body.stream) {
         metric.sseContentType = !!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream');
-        // Never await a cloned SSE body: that would buffer away real streaming.
-        return response;
+        // A bounded shape-only tap forwards original bytes without waiting for EOF.
+        metric.sseDiagnostics = newSseDiagnostics();
+        return tapSseDiagnostics(response, metric.sseDiagnostics);
       }
       // The cloned response is transient; only bounded numeric usage is retained.
       try {
