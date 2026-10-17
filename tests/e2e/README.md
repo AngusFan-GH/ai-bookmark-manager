@@ -35,7 +35,7 @@ Pregranting avoids the native permissions dialog; the suite does **not** prove t
 - Mocked 429 and aborted provider requests retain the draft; retry succeeds.
 - AI selection scope transmits exactly one explicitly selected bookmark.
 - Workspace/import/health/sidepanel screenshots at 390, 768, 1024 and 1440 px assert no document-level horizontal overflow. Keyboard local search is exercised.
-- Opted-in popup advice appears automatically but does not overwrite title/folder fields or save. Explicitly applying advice changes the draft only.
+- Opted-in popup advice appears inline after a native unsaved-page lookup, without overwriting title/folder fields or saving. Each field has a separate apply action. Reopening a saved URL shows all current locations, including a newly added native copy without explicit sync, and offers view/edit with no automatic AI calls. A synthetic native-tree failure pauses advice and exposes a retry action.
 - The actual extension action popup is opened with a browser action keyboard shortcut under CI; active synthetic page quick-save and local popup search are exercised.
 - Uncaught workspace/popup errors fail the run.
 

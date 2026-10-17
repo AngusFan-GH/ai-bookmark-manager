@@ -3,6 +3,8 @@ import { createApp, defineComponent, h, nextTick, reactive, type App } from 'vue
 import Editor from '../../entrypoints/options/components/BookmarkEditor.vue';
 import type { FolderRecord } from '../../src/domain/bookmarks/types';
 
+const lookup = vi.hoisted(() => vi.fn());
+vi.mock('../../src/workspace-client', () => ({findExistingBookmarks:lookup}));
 let app: App; let host: HTMLDivElement;
 const requestAdvice = vi.fn(), cancelAdvice = vi.fn(), prepare = vi.fn();
 const folder: FolderRecord = { id:'local-bar',browserId:'bar',parentId:'0',title:'Bar',path:'Bar',index:0,updatedAt:0,syncGeneration:1 };
@@ -19,7 +21,7 @@ async function mount(enabled=true) {
   app.component('ElAlert',pass);app.mount(host);await flush();
 }
 async function editTitle(title:string){const input=host.querySelector('#bookmark-editor-title') as HTMLInputElement;input.value=title;input.dispatchEvent(new Event('input'));await flush();}
-beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();});
+beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();lookup.mockResolvedValue({bookmarks:[]});});
 afterEach(()=>{app?.unmount();host?.remove();vi.useRealTimers();});
 describe('automatic editor advice',()=>{
   it('debounces valid drafts and never writes or applies advice automatically',async()=>{
@@ -51,4 +53,24 @@ describe('automatic editor advice',()=>{
     const retry=[...host.querySelectorAll('button')].find(b=>b.textContent==='重试建议')!;expect(retry.disabled).toBe(false);retry.click();await flush();expect(requestAdvice).toHaveBeenCalledTimes(2);
     expect((host.querySelector('#bookmark-editor-title') as HTMLInputElement).disabled).toBe(false);
   });
+  it('shows existing locations and skips advice even with AI enabled',async()=>{
+    lookup.mockResolvedValue({bookmarks:[{id:'saved',browserId:'saved',title:'Existing',url:'https://example.test',parentId:'bar',path:'Bar / Existing'}]});
+    await mount();await vi.advanceTimersByTimeAsync(2000);expect(requestAdvice).not.toHaveBeenCalled();expect(host.textContent).toContain('这个页面已收藏');expect(host.textContent).toContain('编辑已有书签');
+  });
+  it('does not analyze while membership is unknown or fails',async()=>{
+    let reject!:(reason:Error)=>void;lookup.mockImplementation(()=>new Promise((_,r)=>{reject=r;}));await mount();await vi.advanceTimersByTimeAsync(2000);expect(requestAdvice).not.toHaveBeenCalled();
+    reject(new Error('Unavailable'));await flush();await vi.advanceTimersByTimeAsync(2000);expect(requestAdvice).not.toHaveBeenCalled();expect(host.textContent).toContain('已暂停建议');
+  });
+  it('discards an old membership result when the URL changes',async()=>{
+    let resolve!:(value:unknown)=>void;lookup.mockImplementationOnce(()=>new Promise(r=>{resolve=r;}));await mount();
+    const input=host.querySelector('#bookmark-editor-url') as HTMLInputElement;input.value='https://new.test';input.dispatchEvent(new Event('input'));await flush();
+    resolve({bookmarks:[{browserId:'old',title:'Old saved location',path:'Old saved location'}]});await flush();await vi.advanceTimersByTimeAsync(800);
+    expect(host.textContent).not.toContain('Old saved location');expect(requestAdvice).toHaveBeenCalledWith(expect.objectContaining({url:'https://new.test'}));
+  });
+  it('adopts title separately without changing the folder or requesting AI again',async()=>{
+    await mount();await vi.advanceTimersByTimeAsync(800);props.advice={title:'Suggested',targetFolderId:'bar',reason:'Reason'};await flush();
+    [...host.querySelectorAll('button')].find(b=>b.textContent==='采用标题')!.click();await flush();await vi.advanceTimersByTimeAsync(800);
+    expect((host.querySelector('#bookmark-editor-title') as HTMLInputElement).value).toBe('Suggested');expect((host.querySelector('#bookmark-editor-destination') as HTMLInputElement).value).toBe('local-bar');expect(requestAdvice).toHaveBeenCalledTimes(1);
+  });
+
 });

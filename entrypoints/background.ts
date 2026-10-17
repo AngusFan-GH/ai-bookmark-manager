@@ -450,7 +450,7 @@ export default defineBackground(() => {
     isPaused: () => healthPaused,
   });
 
-  registerWorkspaceHandlers(router, { db, planService, canFetch: containsHealthPermission });
+  registerWorkspaceHandlers(router, { db, planService, canFetch: containsHealthPermission, readTree: () => adapter.getTree() });
 
   // ---- Message handler --------------------------------------------------
   // Reject messages from other extensions.

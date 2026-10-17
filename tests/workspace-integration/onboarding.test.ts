@@ -11,7 +11,7 @@ async function fixture(){
  const db=new BookmarkDatabase('onboarding-'+crypto.randomUUID());dbs.push(db);
  const session:Record<string,unknown>={};const local:Record<string,unknown>={};
  const area=(data:Record<string,unknown>)=>({get:vi.fn(async(key:string)=>({[key]:data[key]})),set:vi.fn(async(input:Record<string,unknown>)=>Object.assign(data,input)),remove:vi.fn(async(key:string)=>{delete data[key];}),setAccessLevel:vi.fn(async()=>{})});
- vi.stubGlobal('chrome',{storage:{session:area(session),local:area(local)}});
+ vi.stubGlobal('chrome',{storage:{session:area(session),local:area(local)},bookmarks:{getTree:vi.fn(async()=>[])}});
  const router=new BackgroundRouter({} as ConstructorParameters<typeof BackgroundRouter>[0]);const canFetch=vi.fn(async()=>true);
  registerWorkspaceHandlers(router,{db,planService:{} as PlanService,canFetch});
  const dispatch=(type:string,rest:object={})=>router.dispatch({type,requestId:crypto.randomUUID(),...rest});

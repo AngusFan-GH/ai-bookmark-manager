@@ -25,6 +25,7 @@ export type WorkspaceRequest = { requestId: string } & (
   | {type:'CONTENT_STATUS';bookmarkIds:string[]}
   | {type:'PLAN_RECOVERY_PREPARE';planId:string}
   | {type:'ASSISTANT_ADVISE_BOOKMARK';automatic?:boolean;input:{title:string;url:string;parentFolderId?:string}}
+  | {type:'CAPTURE_LOOKUP';url:string}
   | {type:'CAPTURE_STORE';input:{title:string;url:string}}
   | {type:'CAPTURE_GET';captureId:string} );
 const id = () => crypto.randomUUID();
@@ -48,6 +49,7 @@ export const fetchContent = (bookmarkIds:string[]) => request<ContentResult>({ty
 export interface BookmarkAdvice {title:string;targetFolderId:string;reason:string}
 export const adviseBookmark = (input:{title:string;url:string;parentFolderId?:string},options:{automatic?:boolean;requestId?:string}={}) => request<BookmarkAdvice>({type:'ASSISTANT_ADVISE_BOOKMARK',input,...options,requestId:options.requestId??id()});
 export const prepareRecovery = (planId:string) => request<OperationPlan>({type:'PLAN_RECOVERY_PREPARE',planId,requestId:id()});
+export const findExistingBookmarks = (url:string) => request<{bookmarks:BookmarkRecord[]}>({type:'CAPTURE_LOOKUP',url,requestId:id()});
 export const storeCapture = (input:{title:string;url:string}) => request<{captureId:string}>({type:'CAPTURE_STORE',input,requestId:id()});
 export const getCapture = (captureId:string) => request<{title:string;url:string}|undefined>({type:'CAPTURE_GET',captureId,requestId:id()});
 export const clearContent = (bookmarkIds:string[]) => request<void>({type:'CONTENT_CLEAR',bookmarkIds,requestId:id()});

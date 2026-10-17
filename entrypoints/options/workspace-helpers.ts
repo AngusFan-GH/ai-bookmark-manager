@@ -112,6 +112,7 @@ export function contentResultLabel(status:string, reason=''):string {
 }
 export function workspaceErrorLabel(error:unknown):string {
   const message=error instanceof Error?error.message:String(error);
+  if(message==='这条收藏已移动或删除，请重新检查收藏状态。'||message==='书签引用无效，请重新检查收藏状态。')return message;
   if(message==='建议新目录名称不能为空，请填写后重新预览。')return message;
   if(message==='建议中的新目录不存在，请重新生成整理建议。')return message;
   if(/截断|truncat|token.*上限/i.test(message))return '模型输出被截断。可缩小书签范围，或在 AI 设置的高级设置中提高输出 token 上限后重试。';

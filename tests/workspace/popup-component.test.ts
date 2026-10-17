@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, nextTick, type App } from 'vue';
 import Popup from '../../entrypoints/popup/App.vue';
-const mocks = vi.hoisted(() => ({ request:vi.fn(), prepareOrganization:vi.fn(), storeCapture:vi.fn(), adviseBookmark:vi.fn(), getAssistantSettings:vi.fn(), cancelAdvice:vi.fn(), query:vi.fn(), create:vi.fn(), open:vi.fn(), setOptions:vi.fn() }));
+const mocks = vi.hoisted(() => ({ request:vi.fn(), prepareOrganization:vi.fn(), storeCapture:vi.fn(), adviseBookmark:vi.fn(), getAssistantSettings:vi.fn(), findExistingBookmarks:vi.fn(), cancelAdvice:vi.fn(), query:vi.fn(), create:vi.fn(), open:vi.fn(), setOptions:vi.fn() }));
 vi.mock('../../src/client', () => ({request:mocks.request}));
-vi.mock('../../src/workspace-client', () => ({prepareOrganization:mocks.prepareOrganization,storeCapture:mocks.storeCapture,adviseBookmark:mocks.adviseBookmark,getAssistantSettings:mocks.getAssistantSettings,cancelAdvice:mocks.cancelAdvice}));
+vi.mock('../../src/workspace-client', () => ({prepareOrganization:mocks.prepareOrganization,storeCapture:mocks.storeCapture,adviseBookmark:mocks.adviseBookmark,getAssistantSettings:mocks.getAssistantSettings,findExistingBookmarks:mocks.findExistingBookmarks,cancelAdvice:mocks.cancelAdvice}));
 let app: App; let host: HTMLDivElement;
 async function flush() { for(let i=0;i<12;i++) await nextTick(); }
 async function mount() {host=document.createElement('div');document.body.append(host);app=createApp(Popup);app.mount(host);await flush();}
@@ -14,6 +14,7 @@ beforeEach(()=>{
   vi.useFakeTimers();vi.resetAllMocks();
   vi.stubGlobal('chrome',{tabs:{query:mocks.query,create:mocks.create},runtime:{getURL:(path:string)=>`chrome-extension://synthetic/${path}`},sidePanel:{open:mocks.open,setOptions:mocks.setOptions}});
   mocks.getAssistantSettings.mockResolvedValue({hasKey:false,consent:false,autoSuggestions:false,connectionTested:false});
+  mocks.findExistingBookmarks.mockResolvedValue({bookmarks:[]});
   mocks.cancelAdvice.mockResolvedValue(undefined);
   mocks.query.mockResolvedValue([{id:10,windowId:7,title:'Current page',url:rawUrl}]);
   mocks.request.mockImplementation(async payload=>{
@@ -63,7 +64,7 @@ describe('popup quick actions',()=>{
     await mount();await vi.advanceTimersByTimeAsync(900);await flush();
     expect(mocks.adviseBookmark).toHaveBeenCalledWith({title:'Current page',url:rawUrl,parentFolderId:'1'},expect.objectContaining({automatic:true,requestId:expect.any(String)}));
     expect((host.querySelector('#capture-title') as HTMLInputElement).value).toBe('Current page');expect(host.textContent).toContain('Suggested title');expect(mocks.prepareOrganization).not.toHaveBeenCalled();
-    await click('采用建议');expect((host.querySelector('#capture-title') as HTMLInputElement).value).toBe('Suggested title');
+    await click('采用标题');expect((host.querySelector('#capture-title') as HTMLInputElement).value).toBe('Suggested title');
     await vi.advanceTimersByTimeAsync(1000);expect(mocks.adviseBookmark).toHaveBeenCalledTimes(1);
   });
   it('discards a late result after editing and cancels the old request',async()=>{
@@ -78,11 +79,30 @@ describe('popup quick actions',()=>{
   });
   it('preserves local capture after an AI error, with an explicit retry',async()=>{
     mocks.getAssistantSettings.mockResolvedValue(enabled);mocks.adviseBookmark.mockRejectedValue(new Error('Service unavailable'));await mount();await vi.advanceTimersByTimeAsync(900);await flush();
-    expect(host.textContent).toContain('AI 建议暂不可用');expect((host.querySelector('.primary') as HTMLButtonElement).disabled).toBe(false);await click('重试建议');expect(mocks.adviseBookmark).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain('暂时没有建议');expect((host.querySelector('.primary') as HTMLButtonElement).disabled).toBe(false);await click('重试建议');expect(mocks.adviseBookmark).toHaveBeenCalledTimes(2);
   });
   it('refuses an unavailable suggested directory',async()=>{
     mocks.getAssistantSettings.mockResolvedValue(enabled);mocks.adviseBookmark.mockResolvedValue({title:'AI title',targetFolderId:'invented',reason:'reason'});await mount();await vi.advanceTimersByTimeAsync(900);await flush();
-    const button=[...host.querySelectorAll('button')].find(b=>b.textContent==='采用建议')!;expect(button.disabled).toBe(true);expect((host.querySelector('#capture-folder') as HTMLSelectElement).value).toBe('1');
+    expect([...host.querySelectorAll('button')].some(b=>b.textContent==='采用位置')).toBe(false);expect((host.querySelector('#capture-folder') as HTMLSelectElement).value).toBe('1');
   });
+  it('checks existing bookmarks before AI and shows saved locations with edit actions',async()=>{
+    mocks.getAssistantSettings.mockResolvedValue(enabled);mocks.findExistingBookmarks.mockResolvedValue({bookmarks:[{id:'saved',browserId:'saved',title:'Saved',url:rawUrl,parentId:'1',path:'Bar / Saved'}]});
+    await mount();await vi.advanceTimersByTimeAsync(2000);expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect(host.textContent).toContain('这个页面已收藏');expect(host.textContent).toContain('Bar / Saved');
+    await click('编辑已有书签');expect(mocks.create).toHaveBeenCalledWith({url:'chrome-extension://synthetic/options.html?edit=saved'});
+  });
+  it('waits for membership lookup and fails closed while leaving local capture usable',async()=>{
+    let reject!:(reason:Error)=>void;mocks.getAssistantSettings.mockResolvedValue(enabled);mocks.findExistingBookmarks.mockImplementation(()=>new Promise((_,r)=>{reject=r;}));
+    await mount();await vi.advanceTimersByTimeAsync(2000);expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect(host.textContent).toContain('正在检查是否已收藏');
+    reject(new Error('Unavailable'));await flush();await vi.advanceTimersByTimeAsync(2000);expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect(host.textContent).toContain('已暂停建议');expect((host.querySelector('.primary') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('refreshes membership on native changes and retracts suggestions immediately',async()=>{
+    const listeners=new Set<()=>void>();const event={addListener:(fn:()=>void)=>listeners.add(fn),removeListener:(fn:()=>void)=>listeners.delete(fn)};
+    Object.assign(chrome,{bookmarks:{onCreated:event}});mocks.getAssistantSettings.mockResolvedValue(enabled);mocks.adviseBookmark.mockResolvedValue({title:'AI title',targetFolderId:'1',reason:'Reason'});
+    await mount();await vi.advanceTimersByTimeAsync(900);await flush();expect(host.textContent).toContain('建议标题');
+    mocks.findExistingBookmarks.mockResolvedValue({bookmarks:[{browserId:'new',title:'Saved elsewhere',path:'Elsewhere'}]});listeners.forEach(fn=>fn());await flush();expect(host.textContent).not.toContain('建议标题');
+    await vi.advanceTimersByTimeAsync(1000);await flush();expect(host.textContent).toContain('Elsewhere');expect(mocks.adviseBookmark).toHaveBeenCalledTimes(1);app.unmount();expect(listeners.size).toBe(0);
+  });
+
 });
 const enabled={hasKey:true,consent:true,autoSuggestions:true,connectionTested:true};

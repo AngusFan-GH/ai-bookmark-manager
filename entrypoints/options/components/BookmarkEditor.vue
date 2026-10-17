@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import type { InputInstance, SelectInstance } from 'element-plus';
 import { CollectionTag, EditPen, FolderAdd, FolderOpened, ArrowRight } from '@element-plus/icons-vue';
 import type { BookmarkRecord, FolderRecord } from '../../../src/domain/bookmarks/types';
+import { useCaptureStatus } from '../../../src/use-capture-status';
 import type { OrganizationInput } from '../../../src/workspace-client';
 import { buildBookmarkEditorInput, editorDestinationFolders, initialBookmarkEditorDraft, isEditorWebUrl, type BookmarkEditorErrors, type BookmarkEditorKind } from './bookmark-editor-helpers';
 
@@ -27,8 +28,12 @@ const emit = defineEmits<{
   'request-advice': [input: { title: string; url: string; parentFolderId?: string }];
   'open-settings': [];
   'cancel-advice': [];
+  'edit-existing': [browserId: string];
+  'view-existing': [browserId: string];
 }>();
 const draft = reactive({ title: '', url: '', parentId: '' });
+const { bookmarks: existingBookmarks, state: lookupState, unsaved: confirmedUnsaved, check: checkExisting } = useCaptureStatus(() => draft.url, () => props.modelValue && props.kind === 'bookmark');
+let applyingAdvice = false;
 const errors = ref<BookmarkEditorErrors>({});
 const titleInput = ref<InputInstance>();
 const urlInput = ref<InputInstance>();
@@ -38,7 +43,7 @@ const adviceDraftKey = ref('');
 const draftKey = computed(() => JSON.stringify([draft.title, draft.url, draft.parentId]));
 const visibleAdvice = computed(() => props.advice && adviceDraftKey.value === draftKey.value ? props.advice : undefined);
 const suggestedFolder = computed(() => props.folders.find(folder => folder.id === visibleAdvice.value?.targetFolderId || folder.browserId === visibleAdvice.value?.targetFolderId));
-const canUseAdvice = computed(() => !!visibleAdvice.value?.title?.trim() && !!destinations.value.find(folder => folder.id === suggestedFolder.value?.id));
+const canUseFolderAdvice = computed(() => !!destinations.value.find(folder => folder.id === suggestedFolder.value?.id));
 const pending = computed(() => props.busy || submitting.value);
 let adviceTimer: ReturnType<typeof setTimeout> | undefined;
 const automaticRequests = ref(0);
@@ -89,30 +94,33 @@ function invalidateAdvice() {
   adviceDraftKey.value = '';
   emit('cancel-advice');
 }
-watch([draftKey, () => props.modelValue, () => props.autoEnabled, pending], () => {
+watch([draftKey, () => props.modelValue, () => props.autoEnabled, confirmedUnsaved, pending], () => {
+  if (applyingAdvice && confirmedUnsaved.value && !pending.value && props.modelValue) { applyingAdvice = false; return; }
+  applyingAdvice = false;
   invalidateAdvice();
-  if (!props.modelValue || props.kind !== 'bookmark' || !props.autoEnabled || pending.value || !draft.title.trim() || !isEditorWebUrl(draft.url.trim()) || !destination.value) return;
+  if (!confirmedUnsaved.value || !props.modelValue || props.kind !== 'bookmark' || !props.autoEnabled || pending.value || !draft.title.trim() || !isEditorWebUrl(draft.url.trim()) || !destination.value) return;
   if (requestedContexts.has(draftKey.value) || automaticRequests.value >= 3) return;
   adviceTimer = setTimeout(requestAdvice, 800);
 }, { immediate: true });
 onBeforeUnmount(invalidateAdvice);
 function requestAdvice() {
-  if (pending.value || !props.modelValue || !props.autoEnabled || !draft.title.trim() || !isEditorWebUrl(draft.url.trim()) || !destination.value) return;
+  if (!confirmedUnsaved.value || pending.value || !props.modelValue || !props.autoEnabled || !draft.title.trim() || !isEditorWebUrl(draft.url.trim()) || !destination.value) return;
   invalidateAdvice();
   adviceDraftKey.value = draftKey.value;
   requestedContexts.add(draftKey.value);
   automaticRequests.value++;
   emit('request-advice', { title: draft.title.trim(), url: draft.url.trim(), parentFolderId: destination.value.browserId });
 }
-function useAdvice() {
-  if (!visibleAdvice.value || !suggestedFolder.value || !canUseAdvice.value || pending.value) return;
-  const title = visibleAdvice.value.title.trim();
-  const parentId = suggestedFolder.value.id;
-  draft.title = title;
-  draft.parentId = parentId;
+function useAdvice(field: 'title' | 'folder') {
+  if (!visibleAdvice.value || pending.value) return;
+  const suggestion = visibleAdvice.value;
+  if (field === 'folder' && (!suggestedFolder.value || !canUseFolderAdvice.value)) return;
+  applyingAdvice = true;
+  if (field === 'title') draft.title = suggestion.title.trim();
+  else draft.parentId = suggestedFolder.value!.id;
   errors.value = {};
   requestedContexts.add(draftKey.value);
-  invalidateAdvice();
+  adviceDraftKey.value = draftKey.value;
 }
 async function submit() {
   if (pending.value) return;
@@ -156,7 +164,10 @@ async function submit() {
     </template>
 
     <form id="bookmark-editor-form" class="editor-form" novalidate :aria-busy="pending" @submit.prevent="submit">
-      <div v-if="kind === 'move'" class="selection-summary">
+      <div v-if="kind === 'bookmark' && existingBookmarks.length" class="saved-status" role="status"><strong>这个页面已收藏</strong><p v-for="bookmark in existingBookmarks" :key="bookmark.browserId">{{ bookmark.path || bookmark.title }} <el-button link size="small" @click="emit('view-existing', bookmark.browserId)">查看</el-button><el-button link size="small" @click="emit('edit-existing', bookmark.browserId)">编辑已有书签</el-button></p><span>你也可以继续预览，另存一份。</span></div>
+      <p v-if="kind === 'bookmark' && lookupState === 'checking'" class="field-hint" role="status">正在检查是否已收藏…</p>
+      <p v-if="kind === 'bookmark' && lookupState === 'error'" class="field-hint">暂时无法确认收藏状态，已暂停建议；继续保存可能产生重复书签。<el-button link size="small" @click="checkExisting">重新检查</el-button></p>
+      <div v-if="kind === 'move'"  class="selection-summary">
         <div class="selection-summary-heading"><span>已选择</span><span class="selection-count">{{ selectionCount }} 个条目</span></div>
         <ul>
           <li v-for="record in records.slice(0, 3)" :key="record.browserId">
@@ -170,7 +181,8 @@ async function submit() {
       <div v-if="kind !== 'move'" class="editor-field">
         <label for="bookmark-editor-title">{{ kind === 'folder' || editingFolder ? '目录名称' : '书签标题' }}<span class="required-mark" aria-hidden="true">*</span></label>
         <el-input id="bookmark-editor-title" ref="titleInput" v-model="draft.title" :placeholder="kind === 'folder' || editingFolder ? '例如：设计灵感' : '为这个网页取一个好找的名字'" :disabled="pending" size="large" autocomplete="off" :aria-invalid="!!errors.title" :aria-describedby="errors.title ? 'bookmark-editor-title-error' : undefined" aria-required="true" @input="clearError('title')" />
-        <p v-if="errors.title" id="bookmark-editor-title-error" class="field-error" role="alert">{{ errors.title }}</p>
+        <p v-if="visibleAdvice?.title.trim() && visibleAdvice.title.trim() !== draft.title.trim()" class="inline-suggestion" :title="visibleAdvice.reason"><span>建议标题：{{ visibleAdvice.title }}</span><el-button link size="small" :disabled="pending" @click="useAdvice('title')">采用标题</el-button></p>
+        <p v-if="errors.title"  id="bookmark-editor-title-error" class="field-error" role="alert">{{ errors.title }}</p>
       </div>
 
       <div v-if="showUrl" class="editor-field">
@@ -187,27 +199,22 @@ async function submit() {
             <span class="folder-option"><el-icon aria-hidden="true"><FolderOpened /></el-icon><span>{{ folder.path || folder.title || '未命名目录' }}</span></span>
           </el-option>
         </el-select>
-        <p v-if="errors.parentId" id="bookmark-editor-destination-error" class="field-error" role="alert">{{ errors.parentId }}</p>
+        <p v-if="visibleAdvice && canUseFolderAdvice && suggestedFolder?.id !== draft.parentId" class="inline-suggestion" :title="visibleAdvice.reason"><span>建议位置：{{ suggestedFolder?.path || suggestedFolder?.title }}</span><el-button link size="small" :disabled="pending" @click="useAdvice('folder')">采用位置</el-button></p>
+        <p v-if="errors.parentId"  id="bookmark-editor-destination-error" class="field-error" role="alert">{{ errors.parentId }}</p>
         <p v-else id="bookmark-editor-destination-hint" class="field-hint">{{ !destinations.length ? '没有可写入的目录。请先在浏览器中创建一个书签目录。' : destination ? `保存位置：${destination.path || destination.title || '未命名目录'}` : '请选择一个书签目录，浏览器根目录不能直接写入。' }}</p>
       </div>
       <div v-else class="current-location"><el-icon aria-hidden="true"><FolderOpened /></el-icon><div><span>当前目录</span><p>{{ currentFolder }}</p></div></div>
 
-      <div v-if="kind === 'bookmark'" class="advice-section">
-        <div class="advice-prompt"><div><strong>AI 自动归类建议</strong><p>{{ requestingAdvice ? '正在根据标题、网址和目录信息生成建议，可继续编辑或保存。' : autoEnabled ? '填写后自动建议标题和目录，采用前不会修改你的输入。' : '本地功能可直接使用；配置并测试 AI、同意元数据发送后，可开启自动建议。' }}</p></div><el-button v-if="!autoEnabled" @click="emit('open-settings')">设置 AI</el-button></div>
-        <p v-if="autoEnabled && automaticRequests >= 3 && !visibleAdvice && !requestingAdvice && !adviceError" class="field-hint">本次自动建议次数已用完，仍可直接预览更改。</p>
-        <p v-if="adviceError" class="field-error" role="alert">AI 建议暂不可用：{{ adviceError }} <el-button size="small" :disabled="pending || requestingAdvice" @click="requestAdvice">重试建议</el-button></p>
-        <div v-if="visibleAdvice" class="advice-result" aria-live="polite">
-          <span class="advice-label">AI 建议</span><strong>{{ visibleAdvice.title }}</strong><p class="advice-folder"><el-icon aria-hidden="true"><FolderOpened /></el-icon>{{ suggestedFolder?.path || suggestedFolder?.title || '建议目录已不可用' }}</p><p>{{ visibleAdvice.reason }}</p>
-          <el-button size="small" :disabled="!canUseAdvice || pending" @click="useAdvice">采用建议</el-button><span v-if="!canUseAdvice" class="field-error">建议已失效，可以重新获取。</span>
-        </div>
-      </div>
+      <p v-if="kind === 'bookmark' && requestingAdvice" class="field-hint" role="status">正在看看有没有更合适的标题和位置…</p>
+      <p v-if="kind === 'bookmark' && confirmedUnsaved && !autoEnabled" class="field-hint">需要标题和目录建议？<el-button link size="small" @click="emit('open-settings')">设置 AI</el-button></p>
+      <p v-if="kind === 'bookmark' && confirmedUnsaved && adviceError" class="field-hint">暂时没有建议，不影响保存。<el-button link size="small" :disabled="pending || requestingAdvice" @click="requestAdvice">重试建议</el-button></p>
       <el-alert v-if="serverError" :title="serverError" type="error" :closable="false" show-icon />
       <div v-if="errors.form" class="form-error" role="alert">{{ errors.form }}</div>
       <div class="preview-note"><span class="preview-dot" aria-hidden="true"></span><p>系统自动保存写入前快照，审核并确认后才会写入原生书签。</p></div>
     </form>
 
     <template #footer>
-      <div class="editor-footer"><el-button :disabled="pending" size="large" @click="close">取消</el-button><el-button native-type="submit" form="bookmark-editor-form" type="primary" :loading="pending" size="large">预览更改<el-icon class="preview-arrow" aria-hidden="true"><ArrowRight /></el-icon></el-button></div>
+      <div class="editor-footer"><el-button :disabled="pending" size="large" @click="close">取消</el-button><el-button native-type="submit" form="bookmark-editor-form" type="primary" :loading="pending" size="large">{{ kind === 'bookmark' && existingBookmarks.length ? '预览另存一份' : '预览更改' }}<el-icon class="preview-arrow" aria-hidden="true"><ArrowRight /></el-icon></el-button></div>
     </template>
   </el-dialog>
 </template>
@@ -244,17 +251,7 @@ async function submit() {
 .current-location span { color: #68778e; font-size: 12px; }
 .current-location p { margin: 4px 0 0; color: #34435a; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .form-error { padding: 11px 13px; border: 1px solid #f2d4d4; background: #fff7f6; color: #a33a40; font-size: 13px; line-height: 1.65; border-radius: 9px; }
-.advice-section { border: 1px solid #e7eaf6; border-radius: 11px; padding: 13px 14px; background: #fafbff; }
-.advice-prompt { display: flex; align-items: center; gap: 14px; }
-.advice-prompt > div { flex: 1; }
-.advice-prompt strong { color: #4d5973; font-size: 13px; }
-.advice-prompt p, .advice-result p { color: #68778e; font-size: 12px; line-height: 1.65; margin: 5px 0 0; overflow-wrap: anywhere; }
-.advice-result { margin-top: 12px; padding: 13px; border: 1px solid #e1e7fc; border-radius: 9px; background: #fff; }
-.advice-label { display: block; color: #6477c7; font-size: 11px; margin-bottom: 7px; }
-.advice-result > strong { color: #34435a; font-size: 14px; overflow-wrap: anywhere; }
-.advice-result .advice-folder { display: flex; align-items: center; gap: 6px; color: #4f60a0; }
-.advice-result .el-button { margin-top: 10px; }
-.advice-result .field-error { display: block; }
+.inline-suggestion { display:flex;gap:10px;align-items:center;color:#68778e;font-size:12px;line-height:1.6;margin:7px 0 0; }.inline-suggestion span {flex:1}.saved-status {border-left:2px solid #a9c4b0;padding-left:12px;color:#526b59;font-size:12px;line-height:1.7}.saved-status p{margin:4px 0}.saved-status>span{color:#68778e}
 .preview-note { display: flex; align-items: flex-start; gap: 8px; padding-top: 1px; color: #68778e; }
 .preview-dot { width: 6px; height: 6px; border-radius: 50%; background: #8799ce; margin-top: 7px; flex: 0 0 auto; }
 .preview-note p { margin: 0; font-size: 12px; line-height: 1.7; }

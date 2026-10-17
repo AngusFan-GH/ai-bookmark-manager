@@ -328,26 +328,32 @@ try {
  await request('ASSISTANT_SETTINGS_SAVE',{settings:{...await request('ASSISTANT_SETTINGS_GET'),autoSuggestions:true}});
  // Opening popup.html as a tab cannot reproduce Chrome's activeTab grant. Use the real extension action popup.
  const sourcePage=await context.newPage();await sourcePage.goto('https://example.test/capture?Keep=YES#frag');await sourcePage.bringToFront();
- const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
- if(process.env.E2E_NATIVE_POPUP==='shortcut') await execFileAsync('xdotool',['key','--clearmodifiers','ctrl+shift+y']);
- else await worker.evaluate(()=>chrome.action.openPopup());
- const cdp=await context.newCDPSession(sourcePage);
- const targets=await cdp.send('Target.getTargets');
- await writeFile(path.join(artifactDir,'popup-targets.json'),JSON.stringify({headed:process.env.E2E_HEADED==='1',nativePopup:process.env.E2E_NATIVE_POPUP??'openPopup',targets},null,2));
- console.log('Popup target diagnostics:',JSON.stringify(targets));
- const popup=await popupPromise;
- assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();
- await popup.locator('.advice').waitFor();
+ const openNativePopup=async()=>{
+  await sourcePage.bringToFront();
+  const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
+  if(process.env.E2E_NATIVE_POPUP==='shortcut') await execFileAsync('xdotool',['key','--clearmodifiers','ctrl+shift+y']);
+  else await worker.evaluate(()=>chrome.action.openPopup());
+  const cdp=await context.newCDPSession(sourcePage);const targets=await cdp.send('Target.getTargets');
+  await writeFile(path.join(artifactDir,'popup-targets.json'),JSON.stringify({headed:process.env.E2E_HEADED==='1',nativePopup:process.env.E2E_NATIVE_POPUP??'openPopup',targets},null,2));
+  await cdp.detach();
+  const popup=await popupPromise;
+  assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);
+  popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();return popup;
+ };
+ const popup=await openNativePopup();
+ await popup.getByRole('button',{name:'采用标题',exact:true}).waitFor();
  assert.equal(await popup.getByLabel('标题',{exact:true}).inputValue(),'Synthetic capture page');
  const originalFolder=await popup.getByLabel('保存到',{exact:true}).inputValue();
  assert.notEqual(originalFolder,ids.target);
  const popupAdviceCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
  assert.equal(popupAdviceCall.page.url,'https://example.test/capture?Keep=YES#frag');
- await popup.getByRole('button',{name:'采用建议',exact:true}).click();
+ await popup.getByRole('button',{name:'采用标题',exact:true}).click();
+ assert.equal(await popup.getByLabel('保存到',{exact:true}).inputValue(),originalFolder);
+ await popup.getByRole('button',{name:'采用位置',exact:true}).click();
  assert.equal(await popup.getByLabel('标题',{exact:true}).inputValue(),'Synthetic advised title');
  assert.equal(await popup.getByLabel('保存到',{exact:true}).inputValue(),ids.target);
  assert.equal((await native(()=>chrome.bookmarks.search({url:'https://example.test/capture?Keep=YES#frag'}))).length,0);
- pass('native popup automatically offers scoped advice without overwriting fields or saving; explicit apply changes the draft only');
+ pass('native popup offers inline advice only after local lookup; applying each field leaves the other untouched and never saves');
  await popup.getByLabel('标题',{exact:true}).fill('Synthetic Quick Save');
  await popup.getByRole('button',{name:'确认收藏',exact:true}).click();await popup.getByRole('button',{name:'✓ 已收藏',exact:true}).waitFor();
  await popup.getByRole('searchbox',{name:'搜索已有书签',exact:true}).fill('Synthetic Quick Save');
@@ -355,6 +361,40 @@ try {
  const quick=(await native(()=>chrome.bookmarks.search({title:'Synthetic Quick Save'})))[0];assert.equal(quick.url,'https://example.test/capture?Keep=YES#frag');
  await popup.screenshot({path:path.join(artifactDir,'popup-quick-save.png')});
  pass('real extension action popup saves the active synthetic page and finds it through local search');
+ await popup.close();
+ // Create another native copy without requesting SYNC. Capture status must read
+ // current native membership and display every location, not a cached index hit.
+ await native(async ({root,url})=>{
+  const folder=await chrome.bookmarks.create({parentId:root,title:'Synthetic Fresh Capture Folder'});
+  await chrome.bookmarks.create({parentId:folder.id,title:'Synthetic Fresh Native Copy',url});
+ },{root:ids.root,url:'https://example.test/capture?Keep=YES#frag'});
+ const callsBeforeExisting=await worker.evaluate(()=>globalThis.__mockCalls.length);
+ const existingPopup=await openNativePopup();
+ await existingPopup.getByText('这个页面已收藏',{exact:true}).waitFor();
+ const savedStatus=existingPopup.locator('.saved-status');
+ await savedStatus.getByText(/Synthetic Fresh Capture Folder/).waitFor();
+ assert.equal(await savedStatus.getByRole('button',{name:'查看',exact:true}).count(),2);
+ assert.equal(await savedStatus.getByRole('button',{name:'编辑已有书签',exact:true}).count(),2);
+ await existingPopup.waitForTimeout(1200);
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeExisting);
+ assert.equal(await existingPopup.locator('.inline-suggestion').count(),0);
+ assert.equal((await native(()=>chrome.bookmarks.search({url:'https://example.test/capture?Keep=YES#frag'}))).length,2);
+ await existingPopup.screenshot({path:path.join(artifactDir,'popup-existing-locations.png')});
+ pass('reopened native popup shows both saved locations without explicit index sync and offers view/edit with zero automatic AI calls');
+ await existingPopup.close();
+ // A failed authoritative membership read must not be interpreted as unsaved.
+ await sourcePage.goto('https://example.test/unknown-capture');
+ await worker.evaluate(()=>{globalThis.__realGetTree=chrome.bookmarks.getTree;chrome.bookmarks.getTree=async()=>{throw new Error('Synthetic native lookup failure');};});
+ const callsBeforeUnknown=await worker.evaluate(()=>globalThis.__mockCalls.length);
+ const unknownPopup=await openNativePopup();
+ await unknownPopup.getByText('暂时无法确认收藏状态，已暂停建议',{exact:false}).waitFor();
+ await unknownPopup.getByRole('button',{name:'重新检查',exact:true}).waitFor();
+ await unknownPopup.waitForTimeout(1200);
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeUnknown);
+ assert.equal(await unknownPopup.locator('.inline-suggestion').count(),0);
+ await worker.evaluate(()=>{chrome.bookmarks.getTree=globalThis.__realGetTree;delete globalThis.__realGetTree;});
+ await unknownPopup.close();
+ pass('failed native capture lookup pauses automatic advice instead of treating unknown status as a new bookmark');
  assert.deepEqual(errors,[]);pass('no uncaught workspace page errors');
  await writeFile(path.join(artifactDir,'report.json'),JSON.stringify({checks,errors,syntheticOnly:true,mockProvider:true,liveProviderTested:false},null,2));
  console.log(`Artifacts: ${artifactDir}`);

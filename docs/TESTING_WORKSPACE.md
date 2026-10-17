@@ -27,7 +27,9 @@ suite explicitly starts its own loopback test server.
 The synthetic Chromium harness includes persistent first-run skip/reopen, a fixed
 bookmark-free connection-test prompt, automatic search/organization suggestions,
 consent and configuration gates, cancellation/stale-search invalidation, and popup
-advice that requires explicit application before capture. These assertions must run
+advice with independent field application before capture. Capture acceptance also
+checks native existing-URL membership before AI, multiple saved locations without
+explicit index sync, and suppression of advice when native lookup fails. These assertions must run
 successfully for the exact build before being reported as browser-verified.
 
 ## Environment limits

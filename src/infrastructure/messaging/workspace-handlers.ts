@@ -1,3 +1,5 @@
+import {findExactNativeBookmarks, serializeCaptureUrl} from './capture-lookup';
+import type {RawBookmarkNode} from '../../domain/bookmarks/types';
 import type { BackgroundRouter } from './background-router';
 import type { BookmarkDatabase } from '../database/db';
 import type { PlanService } from '../../domain/operations/plan-service';
@@ -56,8 +58,13 @@ export function validateSettings(input:SettingsInput):void {
   if(input.contentEnhancement !== undefined && typeof input.contentEnhancement!=='boolean') throw new Error('内容增强设置无效');
   if(input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 8192)) throw new Error('密钥格式无效');
 }
-interface HandlerDeps {db:BookmarkDatabase;planService:PlanService;canFetch:(url:string)=>Promise<boolean>}
-export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planService,canFetch}:HandlerDeps):void {
+interface HandlerDeps {db:BookmarkDatabase;planService:PlanService;canFetch:(url:string)=>Promise<boolean>;readTree?:()=>Promise<RawBookmarkNode[]>}
+export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planService,canFetch,readTree=()=>chrome.bookmarks.getTree()}:HandlerDeps):void {
+  const lookupCapture=async (url:string) => {
+    serializeCaptureUrl(url);
+    try {return {bookmarks:findExactNativeBookmarks(await readTree(),url)};}
+    catch {throw new Error('无法检查当前书签，请重试；未发送 AI 分析请求');}
+  };
   const repository=createAssistantRepository(db);
   const outboundRepository:AssistantRepository={...repository,
     async listBookmarks(){const [rows,folders,settings]=await Promise.all([repository.listBookmarks(),repository.listFolders(),readSettings()]);const excluded=excludedFolderSet(folders,settings.excludedFolderIds);return rows.filter(b=>!!b.url&&safeForAssistant(b.url)&&(!b.parentId||!excluded.has(b.parentId)));},
@@ -261,6 +268,7 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
       return planService.draftOrganization(input);
     })
     .register('PLAN_RECOVERY_PREPARE',async req=>planService.draftRecovery(req.planId))
+    .register('CAPTURE_LOOKUP',async req=>lookupCapture(req.url))
     .register('CAPTURE_STORE',async req=>{
       if(!req.input||typeof req.input.title!=='string'||req.input.title.length>1000||typeof req.input.url!=='string'||req.input.url.length>10000||!/^https?:$/i.test(new URL(req.input.url).protocol))throw new Error('当前页面不是可收藏的网页');
       const captureId=crypto.randomUUID();await (await storageArea('session')).set({['capture:'+captureId]:{...req.input,createdAt:Date.now()}});return {captureId};
@@ -275,6 +283,8 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
       const key='advice:'+req.requestId;if(controllers.has(key))throw new Error('该建议正在生成');const controller=new AbortController();controllers.set(key,controller);
       try {const settings=await readSettings();if(req.automatic)assertAutomatic(settings);if(!settings.consent)throw new Error('请先确认向 MiniMax 发送页面标题和地址');
       if(!req.input||typeof req.input.url!=='string'||!safeForAssistant(req.input.url))throw new Error('此地址不适合发送给模型，请直接手动保存');
+      if(req.automatic && (await lookupCapture(req.input.url)).bookmarks.length)throw new Error('此页面已收藏，请查看或编辑已有书签');
+      if(controller.signal.aborted)throw new Error('请求已取消');
       const apiKey=await readKey(settings);if(!apiKey)throw new Error('请先配置 MiniMax 密钥');
       const endpoint=settings.region==='cn'?'https://api.minimax.cn/v1/chat/completions':'https://api.minimax.io/v1/chat/completions';
       if(!await canFetch(endpoint))throw new Error('请在 AI 设置中授予所选服务的访问权限');
