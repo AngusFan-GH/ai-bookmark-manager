@@ -17,7 +17,7 @@
 // and ephemeral task bookkeeping. It intentionally does not claim to survive
 // an MV3 service-worker restart; a persisted job queue is future work.
 
-import type { LinkCheckRecord, LinkStatus } from './types';
+import type { LinkCheckRecord, LinkStatus, HealthObservation } from './types';
 
 export interface SchedulerInputItem {
   bookmarkId: string;
@@ -27,6 +27,7 @@ export interface SchedulerInputItem {
 }
 
 export interface SchedulerAttemptResult {
+  method?: 'HEAD' | 'GET';
   httpCode?: number;
   finalUrl?: string;
   status: LinkStatus;
@@ -81,6 +82,7 @@ export class TaskScheduler {
   };
   private drainPromise: Promise<void> | null = null;
   private paused = false;
+  private failure: unknown = null;
   private wakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly deps: SchedulerDeps) {}
@@ -138,6 +140,7 @@ export class TaskScheduler {
     })();
     await this.drainPromise;
     this.drainPromise = null;
+    if (this.failure) throw this.failure;
   }
 
   private kick(): void {
@@ -192,7 +195,7 @@ export class TaskScheduler {
     this.wakeTimer = setTimeout(() => {
       this.wakeTimer = null;
       this.kick();
-    }, Math.max(0, at - this.deps.now()) + 5);
+    }, Math.min(2_147_483_647, Math.max(0, at - this.deps.now()) + 5));
   }
 
   private runOne(it: SchedulerInputItem): void {
@@ -208,6 +211,7 @@ export class TaskScheduler {
         // Per-attempt loop with retry budget
         let attempt = 0;
         let priorDeadResponses = 0;
+        const observations: HealthObservation[] = [];
         let lastResult: SchedulerAttemptResult | null = null;
         while (attempt <= this.deps.maxRetries) {
           if (this.state.cancelled.has(it.bookmarkId)) {
@@ -217,7 +221,10 @@ export class TaskScheduler {
           const result = await this.deps.probe(it.bookmarkId, it.url, attempt, itemAc.signal, priorDeadResponses);
           if (this.state.cancelled.has(it.bookmarkId)) return;
           lastResult = result;
-          if (result.httpCode === 404 || result.httpCode === 410) priorDeadResponses += 1;
+          const retryAfterSec = typeof result.retryAfterSec === 'number' && Number.isFinite(result.retryAfterSec) && result.retryAfterSec >= 0
+            ? Math.min(result.retryAfterSec, 365 * 24 * 60 * 60) : undefined;
+          observations.push({ checkedAt: this.deps.now(), method: result.method, httpCode: result.httpCode, status: result.status, evidence: result.evidence });
+          if (result.method === 'GET' && (result.httpCode === 404 || result.httpCode === 410)) priorDeadResponses += 1;
 
           // Persist every attempt? The dev guide's audit log covers
           // operations; for health we keep just the final record.
@@ -237,24 +244,25 @@ export class TaskScheduler {
               errorCode: result.errorCode,
               checkedAt: this.deps.now(),
               evidence: result.evidence,
+              observations: [...observations],
               syncGeneration: it.syncGeneration,
-              ...(result.retryAfterSec != null ? { retryAt: this.deps.now() + result.retryAfterSec * 1000 } : {}),
+              ...(retryAfterSec != null ? { retryAt: this.deps.now() + retryAfterSec * 1000 } : {}),
             };
             await this.deps.saveCheck(rec);
-            if (result.status === 'rate_limited' && result.retryAfterSec) {
-              this.state.hostGate.set(hostOf(it.url), this.deps.now() + result.retryAfterSec * 1000);
+            if (result.status === 'rate_limited' && retryAfterSec) {
+              this.state.hostGate.set(hostOf(it.url), this.deps.now() + retryAfterSec * 1000);
             }
             break;
           }
 
           // A transient network failure and a first 404/410 are both
-          // rechecked. The latter is deliberately not called "dead" until
-          // it survives a second, independent request.
+          // rechecked. Even repeated responses only establish observed HTTP
+          // behavior during this scan, never permanent death.
           if (result.status === 'network_error' || result.status === 'suspected_dead') {
             attempt += 1;
             if (attempt > this.deps.maxRetries) {
               // Final: preserve the most useful outcome instead of upgrading
-              // a single 404/410 to confirmed_dead without a recheck.
+              // a single 404/410 to repeated evidence without a recheck.
               const rec: LinkCheckRecord = {
                 id: this.deps.newId(),
                 bookmarkId: it.bookmarkId,
@@ -265,12 +273,18 @@ export class TaskScheduler {
                 errorCode: result.errorCode,
                 checkedAt: this.deps.now(),
                 evidence: result.evidence,
+                observations: [...observations],
                 syncGeneration: it.syncGeneration,
               };
               await this.deps.saveCheck(rec);
               break;
             }
-            await new Promise((r) => setTimeout(r, Math.min(5_000, 1_000 * attempt)));
+            await new Promise<void>((resolve) => {
+              const done = () => { clearTimeout(timer); itemAc.signal.removeEventListener('abort', done); resolve(); };
+              const timer = setTimeout(done, Math.min(5_000, 1_000 * attempt));
+              itemAc.signal.addEventListener('abort', done, { once: true });
+              if (itemAc.signal.aborted) done();
+            });
             continue;
           }
 
@@ -278,18 +292,23 @@ export class TaskScheduler {
           const rec: LinkCheckRecord = {
             id: this.deps.newId(),
             bookmarkId: it.bookmarkId,
+            url: it.url,
             status: result.status,
             httpCode: result.httpCode,
             finalUrl: result.finalUrl,
             errorCode: result.errorCode,
             checkedAt: this.deps.now(),
             evidence: result.evidence,
+            observations: [...observations],
             syncGeneration: it.syncGeneration,
           };
           await this.deps.saveCheck(rec);
           break;
         }
         void lastResult;
+      } catch (error) {
+        this.failure = error;
+        this.cancelAll();
       } finally {
         this.state.inflightTotal -= 1;
         this.state.hostInflight.set(hostOf(it.url), (this.state.hostInflight.get(hostOf(it.url)) ?? 0) - 1);

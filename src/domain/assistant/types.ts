@@ -4,7 +4,7 @@ export type AssistantMode = 'recommend' | 'organize' | 'assist';
 export interface AssistantScope { folderId?: string; query?: string; bookmarkIds?: string[] }
 export interface AssistantSettings { region: 'global' | 'cn'; model?: string; maxCompletionTokens?: number }
 export interface Citation { citationId: string; bookmarkId: string; title: string; url: string; path: string }
-export interface AssistantReference extends Citation { reason: string }
+export interface AssistantReference extends Citation { reason: string; evidence?: 'metadata' | 'snippet'; evidenceLabel?: string }
 export interface ProposedFolder { proposalId: string; title: string; parentFolderId: string }
 export interface ProposedEdit { bookmarkId: string; title: string; reason: string }
 export interface ProposedDeletion { bookmarkId: string; reason: string }
@@ -12,6 +12,13 @@ export interface BookmarkAdvice { title: string; targetFolderId: string; reason:
 export interface BookmarkAdviceRequest { title: string; url: string; parentFolderId?: string; settings: AssistantSettings; apiKey: string; signal?: AbortSignal }
 export interface ProposedMove { bookmarkId: string; targetFolderId: string; reason: string }
 export interface AssistantDisclosure { totalInScope: number; transmitted: number; omitted: number; metadataOnly: boolean; snippetLimit: number; transmittedFolders?: number; totalFoldersInScope?: number; queryExpansionUsed?: boolean }
+export interface AssistantTaskContext {
+  version: 1;
+  objective: string;
+  refinements: string[];
+  resultOrder: Array<Citation & { position: number }>;
+}
+export interface SuggestionEvidence { bookmarkId: string; title: string; url: string; path: string; parentId: string | null }
 export interface AssistantMessage {
   id: string;
   requestId?: string;
@@ -24,11 +31,13 @@ export interface AssistantMessage {
   edits?: ProposedEdit[];
   deletions?: ProposedDeletion[];
   disclosure?: AssistantDisclosure;
+  suggestionEvidence?: SuggestionEvidence[];
 }
 /** Internal model messages, including reasoning, must never be rendered by the UI. */
 export interface ProviderMessage { role: 'system' | 'user' | 'assistant'; content: string; [key: string]: unknown }
 export interface AssistantSession {
   id: string; mode: AssistantMode; revision: number; scope: AssistantScope;
+  taskContext?: AssistantTaskContext;
   messages: AssistantMessage[]; citations: Citation[]; providerHistory: ProviderMessage[];
   createdAt: number; updatedAt: number; lastTurnRequestId?: string;
 }

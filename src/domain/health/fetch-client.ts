@@ -21,6 +21,7 @@ export interface FetchLikeResponse {
   retryAfterSec: number | null;
   /** Optional body for a small GET (used for soft-404 detection). */
   body?: string;
+  contentType?: string;
   /** The browser refused to expose a manual redirect safely. */
   redirectBlocked?: boolean;
 }
@@ -36,6 +37,8 @@ export interface FetchLikeRequest {
   /** Optional platform DNS resolver. Browser extensions normally lack one. */
   dns?: DnsResolver;
   allowPrivateHosts?: boolean;
+  /** Fetch bounded GET content even after a positive HEAD for tentative review. */
+  inspectContent?: boolean;
 }
 
 export type FetchLikeFn = (req: FetchLikeRequest) => Promise<FetchLikeResponse>;
@@ -59,6 +62,7 @@ export interface FetchAttemptOutcome {
   rawError: string;
   /** The response body, if a GET was performed. */
   body?: string;
+  contentType?: string;
   /** Retry-After (seconds) from the final response. */
   retryAfterSec: number | null;
   /** True when a redirect target could not be inspected safely. */
@@ -134,6 +138,7 @@ export async function fetchOnce(
       networkError: null,
       rawError: '',
       body: resp.body,
+      contentType: resp.contentType,
       retryAfterSec: resp.retryAfterSec,
       ...(resp.redirectBlocked ? { redirectBlocked: true } : {}),
     };
@@ -164,7 +169,7 @@ function extractRawError(err: unknown): string {
     const name = err.name || 'Error';
     const msg = err.message || '';
     // Trim and clamp — the UI evidence list is space-constrained.
-    const clean = msg.replace(/\s+/g, ' ').slice(0, 120);
+    const clean = msg.replace(/https?:\/\/[^\s]+/gi, '[URL omitted]').replace(/\s+/g, ' ').slice(0, 120);
     return clean ? `${name}: ${clean}` : name;
   }
   return String(err).slice(0, 120);
@@ -245,14 +250,14 @@ export async function probeUrl(
   url: string,
   deps: FetchClientDeps,
   opts: Partial<FetchLikeRequest> = {},
-): Promise<{ outcome: FetchAttemptOutcome; method: 'HEAD' | 'GET' }> {
+): Promise<{ outcome: FetchAttemptOutcome; method: 'HEAD' | 'GET'; headHttpCode?: number }> {
   const head = await fetchOnce(url, 'HEAD', deps, opts);
-  if (opts.signal?.aborted || head.networkError === 'abort' || head.redirectBlocked || (head.httpCode > 0 && !shouldRetryAsGet(head.httpCode))) {
+  if (opts.signal?.aborted || head.networkError === 'abort' || head.redirectBlocked || head.httpCode === 429 || head.httpCode === 204 || (head.httpCode > 0 && !shouldRetryAsGet(head.httpCode) && !opts.inspectContent)) {
     return { outcome: head, method: 'HEAD' };
   }
   // HEAD failed or was uninformative; try GET (still bounded).
   const get = await fetchOnce(url, 'GET', deps, opts);
-  return { outcome: get, method: 'GET' };
+  return { outcome: get, method: 'GET', headHttpCode: head.httpCode };
 }
 
 /**

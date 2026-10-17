@@ -1,4 +1,5 @@
 import { streamAssistantTurn, type StreamTurnOptions } from './assistant-stream-client';
+import type { TopicView } from './domain/organization/topics';
 import { request } from './client';
 import type { AssistantSession, AssistantMode, AssistantScope } from './domain/assistant/types';
 import type { BookmarkRecord } from './domain/bookmarks/types';
@@ -10,12 +11,13 @@ export interface SessionSummary { id: string; mode: AssistantMode; updatedAt: nu
 export type KeyStorage = 'session' | 'local';
 export interface AssistantSettingsView { keyStorage: KeyStorage; region: 'cn' | 'global'; model: string; hasKey: boolean; consent: boolean; autoSuggestions?:boolean; onboardingCompleted?:boolean; connectionTested?:boolean; excludedFolderIds?:string[]; contentEnhancement?:boolean; maxCompletionTokens?:number }
 export interface SettingsInput { keyStorage?: KeyStorage; region: 'cn' | 'global'; model: string; apiKey?: string; consent: boolean; autoSuggestions?:boolean; onboardingCompleted?:boolean; excludedFolderIds?:string[]; contentEnhancement?:boolean; maxCompletionTokens?:number }
-export interface OrganizationInput { title: string; steps: Array<{action: 'create' | 'update' | 'rename' | 'move' | 'delete'; targetBrowserId?: string; parentBrowserId?: string; parentStepIndex?: number; desiredAfter?: {title?:string;url?:string;index?:number}; reason?: string}> }
+export interface OrganizationInput { evidence?: import('./domain/operations/plan-service').OrganizationEvidence; title: string; steps: Array<{action: 'create' | 'update' | 'rename' | 'move' | 'delete'; targetBrowserId?: string; parentBrowserId?: string; parentStepIndex?: number; desiredAfter?: {title?:string;url?:string;index?:number}; reason?: string}> }
 export interface DuplicateResult { groups: Array<{url: string; bookmarks: BookmarkRecord[]}> }
 export interface ContentResult { results: Array<{bookmarkId: string; status: string; reason?: string}> }
 export type WorkspaceRequest = { requestId: string } & (
   | {type:'ASSISTANT_SETTINGS_GET'} | {type:'ASSISTANT_SETTINGS_SAVE';settings:SettingsInput}
   | {type:'ASSISTANT_TEST_CONNECTION'} | {type:'ASSISTANT_ONBOARDING_COMPLETE'} | {type:'ASSISTANT_ADVICE_CANCEL';adviceRequestId:string}
+  | {type:'ORGANIZATION_TOPICS'}
   | {type:'ASSISTANT_KEY_CLEAR'} | {type:'ASSISTANT_SESSIONS'}
   | {type:'ASSISTANT_CREATE';input:{mode:AssistantMode;scope?:AssistantScope}}
   | {type:'ASSISTANT_GET';sessionId:string} | {type:'ASSISTANT_TURN';sessionId:string;text:string;automatic?:boolean;expectedRevision?:number}
@@ -59,3 +61,5 @@ export const storeCapture = (input:CaptureDraft) => request<{captureId:string}>(
 export const getCapture = (captureId:string) => request<CaptureDraftView|undefined>({type:'CAPTURE_GET',captureId,requestId:id()});
 export const clearContent = (bookmarkIds:string[]) => request<void>({type:'CONTENT_CLEAR',bookmarkIds,requestId:id()});
 export const getContentStatus = (bookmarkIds:string[]) => request<ContentResult>({type:'CONTENT_STATUS',bookmarkIds,requestId:id()});
+
+export const listTopicViews = () => request<Array<TopicView & {bookmarks: BookmarkRecord[]}>>({type:'ORGANIZATION_TOPICS',requestId:id()});

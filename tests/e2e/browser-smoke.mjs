@@ -11,6 +11,7 @@ import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { HEALTH_FIXTURE_ORIGIN, createHealthHttpFixture, assertHealthHttpMatrix } from './health-http-fixture.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync=promisify(execFile);
@@ -21,16 +22,19 @@ const artifactDir = process.env.E2E_ARTIFACT_DIR || path.join(tmpdir(), 'bookmar
 await mkdir(artifactDir, {recursive:true});
 await cp(path.join(root, '.output/chrome-mv3'), extension, {recursive:true});
 const manifest = JSON.parse(await readFile(path.join(extension,'manifest.json'),'utf8'));
-manifest.host_permissions = ['https://api.minimax.io/*','https://api.minimax.cn/*'];
+manifest.host_permissions = ['https://api.minimax.io/*','https://api.minimax.cn/*',HEALTH_FIXTURE_ORIGIN];
 if(process.env.E2E_NATIVE_POPUP==='shortcut') manifest.commands={...manifest.commands,_execute_action:{suggested_key:{default:'Ctrl+Shift+Y'}}};
 await writeFile(path.join(extension,'manifest.json'),JSON.stringify(manifest));
 const background = path.join(extension, manifest.background.service_worker);
 const mock = `
 // TEST ONLY bootstrap: never forward requests to the internet.
+const nativeFetchForHealthFixture = globalThis.fetch.bind(globalThis);
 globalThis.__mockCalls = [];
 globalThis.__mockErrors = [];
 globalThis.__mockMode = 'ok';
 globalThis.fetch = async (url, init) => {
+ const fixtureUrl=new URL(String(url));
+ if (fixtureUrl.protocol==='https:'&&fixtureUrl.pathname==='/probe'&&!fixtureUrl.search&&['fallback','missing','gone','forbidden','limited','retry','redirect','soft404','login','timeout','cancel'].some(name=>fixtureUrl.hostname===name+'.health-fixture.test')) return nativeFetchForHealthFixture(url,init);
  if (!['https://api.minimax.io/v1/chat/completions','https://api.minimax.cn/v1/chat/completions'].includes(String(url))) throw new Error('E2E blocked network');
  const body = JSON.parse(init.body); globalThis.__mockCalls.push(body);
  if (globalThis.__mockMode === 'error') return new Response('{}',{status:429});
@@ -43,9 +47,12 @@ globalThis.fetch = async (url, init) => {
  else {
  const bookmark=context.bookmarks.find(b=>b.title==='Synthetic Guide') || context.bookmarks[0];
  if(!bookmark) throw new Error('Synthetic candidate missing');
- result={text:'Synthetic answer '+globalThis.__mockCalls.length,references:[{bookmarkId:bookmark.bookmarkId,reason:'Synthetic relevance'}],
+ const second=context.bookmarks.find(b=>b.bookmarkId!==bookmark.bookmarkId);
+ const refs=[bookmark,...(second?[second]:[])];
+ if(context.request.includes('second item'))refs.reverse();
+ result={text:'Synthetic answer '+globalThis.__mockCalls.length,references:refs.map(b=>({bookmarkId:b.bookmarkId,reason:'Synthetic relevance'})),
  folders:context.mode==='recommend'?[]:[{proposalId:'new:synthetic',title:'Synthetic AI Folder',parentFolderId:folder.id}],
- moves:context.mode==='recommend'?[]:[{bookmarkId:bookmark.bookmarkId,targetFolderId:'new:synthetic',reason:'Synthetic move'}]};
+ moves:context.mode==='recommend'?[]:(globalThis.__mockMode==='theme'?refs:[bookmark]).map(b=>({bookmarkId:b.bookmarkId,targetFolderId:'new:synthetic',reason:'Synthetic move'}))};
  }
  if(body.stream===true) {
   const encoded=JSON.stringify(result);const prefix='{"text":"Synthetic ';let cancelled=false;
@@ -71,10 +78,12 @@ globalThis.fetch = async (url, init) => {
 };
 `;
 await writeFile(background,mock+await readFile(background,'utf8'));
+const healthFixture=createHealthHttpFixture();
+const blockedHttpRequests=[];
 let context; let page; let worker; const checks=[]; const errors=[]; const captureErrors=[];
 let currentStage='launch isolated browser';
 const startedAt=Date.now();
-const report = extra => ({checks,errors,captureErrors,currentStage,elapsedMs:Date.now()-startedAt,syntheticOnly:true,mockProvider:true,liveProviderTested:false,...extra});
+const report = extra => ({checks,errors,captureErrors,currentStage,elapsedMs:Date.now()-startedAt,syntheticOnly:true,mockProvider:true,interceptedBrowserHealthHttp:true,liveProviderTested:false,liveWebsitesTested:false,...extra});
 const checkpoint = name => {
  currentStage=name;console.log('STAGE',name);
  writeFileSync(path.join(artifactDir,'progress.json'),JSON.stringify(report({status:'running'}),null,2));
@@ -201,8 +210,13 @@ try {
  context.setDefaultNavigationTimeout(30000);
  checkpoint('load workspace and first-run setup');
  // Even accidental page navigations cannot reach a real website.
- await context.route(/^https?:\/\//,route=>route.request().url().startsWith('https://example.test/')
-  ?route.fulfill({status:200,contentType:'text/html',body:'<title>Synthetic capture page</title><p>Synthetic fixture only</p>'}):route.abort());
+ await context.route(/^https?:\/\//,async route=>{
+  const url=new URL(route.request().url());
+  if(url.protocol==='https:'&&url.hostname.endsWith('.health-fixture.test'))return healthFixture.handle(route);
+  if(url.origin==='https://example.test')return route.fulfill({status:200,contentType:'text/html',body:'<title>Synthetic capture page</title><p>Synthetic fixture only</p>'});
+  blockedHttpRequests.push(route.request().url());
+  return route.abort();
+ });
  worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
  const extensionId = new URL(worker.url()).host;
  const optionsUrl=`chrome-extension://${extensionId}/options.html`;
@@ -258,7 +272,7 @@ try {
   if(!await tools.evaluate(element=>element.open))await tools.locator('summary').click();
   await tools.getByRole('button',{name,exact:true}).click();
  };
- const search=async text=>{await goal().fill(text);await page.getByRole('button',{name:'本地搜索',exact:true}).click();await eventually(async()=>assert(!(await page.locator('.el-loading-mask:visible').count())));};
+ const search=async text=>{await goal().fill(text);await page.getByRole('button',{name:'仅本地搜索',exact:true}).click();await eventually(async()=>assert(!(await page.locator('.el-loading-mask:visible').count())));};
  const closeDialog=dialog=>dialog.getByRole('button',{name:'Close this dialog',exact:true}).click();
  const approve=async(deletion=false)=>{
   const box=page.locator('.approval-box');const execute=box.getByRole('button',{name:/^批准并执行/});
@@ -339,41 +353,45 @@ try {
  // Exercise automatic guidance separately, then isolate the existing manual journeys.
  const configuredSettings=await request('ASSISTANT_SETTINGS_GET');
  const autoCard=page.getByRole('complementary',{name:'自动 AI 建议',exact:true});
- await search('Synthetic Guide');await autoCard.getByRole('button',{name:'查看建议详情',exact:true}).waitFor();
+ const localOnlyCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);
+ await search('Synthetic Guide');await page.waitForTimeout(1100);
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),localOnlyCalls);
  assert.equal(await page.locator('.results-panel tbody tr').count(),1);
- assert.equal((await native(id=>chrome.bookmarks.get(id),ids.guide))[0].parentId,ids.nested);
- let autoCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
- assert.equal(autoCall.mode,'recommend');assert(autoCall.bookmarks.length<=60);assert(autoCall.bookmarks.every(bookmark=>!bookmark.snippet));
- pass('explicit local search automatically adds references alongside unchanged local results without native writes');
+ pass('explicit local-only search stays usable with configured AI and transmits no metadata');
  await page.getByRole('button',{name:/整理书签/}).click();await autoCard.getByRole('button',{name:'查看建议详情',exact:true}).waitFor();
- autoCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
+ const autoCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
  assert.equal(autoCall.mode,'organize');assert(autoCall.bookmarks.every(bookmark=>!bookmark.snippet));assert.equal(autoCall.scope.bookmarkIds.length,1);assert.equal(autoCall.bookmarks.length,1);
  assert.equal(autoCall.bookmarks[0].title,'Synthetic Guide');
  assert.equal((await native(id=>chrome.bookmarks.get(id),ids.guide))[0].parentId,ids.nested);
- pass('entering organize automatically scopes a no-write suggestion to visible bookmarks');
- await browse();await worker.evaluate(()=>{globalThis.__mockMode='wait';});
- let waitingCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);await search('Synthetic');
+ await autoCard.getByRole('button',{name:'忽略建议',exact:true}).click();await autoCard.waitFor({state:'hidden'});
+ pass('entering organize produces bounded no-write suggestions that can be dismissed');
+ await browse();await search('Synthetic');await worker.evaluate(()=>{globalThis.__mockMode='wait';});
+ let waitingCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);
+ await page.getByRole('button',{name:/整理书签/}).click();
  await eventually(async()=>assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),waitingCalls+1));
  await autoCard.getByRole('button',{name:'取消本次建议',exact:true}).click();await autoCard.waitFor({state:'hidden'});
  await page.waitForTimeout(1100);assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),waitingCalls+1);
- waitingCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);await search('Guide');
+ await search('Guide');waitingCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);
+ await page.getByRole('button',{name:/整理书签/}).click();
  await eventually(async()=>assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),waitingCalls+1));
  await search('');await autoCard.waitFor({state:'hidden'});
  await worker.evaluate(()=>{globalThis.__mockMode='ok';});
- pass('automatic suggestions can be canceled and invalidated by changing search; neither silently retries');
+ pass('automatic suggestions can be canceled and invalidated by changing local search; neither silently retries');
  await request('ASSISTANT_SETTINGS_SAVE',{settings:{...configuredSettings,consent:false}});await page.reload();await goal().waitFor();
  const callsWithoutConsent=await worker.evaluate(()=>globalThis.__mockCalls.length);await search('Synthetic Guide');
+ await page.getByRole('button',{name:'开始任务',exact:true}).click();
  await page.waitForTimeout(1100);assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsWithoutConsent);assert.equal(await autoCard.count(),0);
  pass('saved and tested key without metadata consent never triggers automatic search');
  await request('ASSISTANT_SETTINGS_SAVE',{settings:{...configuredSettings,autoSuggestions:false}});
  await page.reload();await goal().waitFor();
  await worker.evaluate(()=>{globalThis.__mockCalls=[];});
- checkpoint('two-turn conversation and history');
- // No backend-generated session or turn: the real goal composer creates and sends both turns.
+ checkpoint('multi-turn task context and history');
+ // No backend-generated session or turn: the real goal composer creates and sends every turn.
  await worker.evaluate(()=>{globalThis.__mockMode='stream-gated';});
- await goal().fill('Organize Synthetic Guide');await page.getByRole('button',{name:'询问 AI',exact:true}).click();
+ await goal().fill('Organize Synthetic Guide; only beginner-friendly Chinese sources');await page.getByRole('button',{name:'开始任务',exact:true}).click();
  const provisional=page.getByRole('article',{name:'正在生成的回复',exact:true});
  await provisional.getByText('Synthetic',{exact:true}).waitFor();
+ await page.locator('.local-task-results').waitFor();
  assert.equal(await provisional.locator('a,button,.message-references').count(),0);
  assert.equal(await page.getByRole('button',{name:'审核整理建议（1）',exact:true}).count(),0);
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.at(-1).stream),true);
@@ -383,16 +401,30 @@ try {
  await provisional.waitFor({state:'hidden'});
  await worker.evaluate(()=>{globalThis.__mockMode='ok';});
  pass('streaming renders real provisional text before validated references or action controls; final reply replaces the preview');
- await goal().fill('Keep the same reference and explain it');await page.getByRole('button',{name:'继续对话',exact:true}).click();
+ const firstResultIds=await page.locator('.task-result-list .citation-id').allTextContents();
+ assert.equal(firstResultIds.length,2);
+ await goal().fill('Explain the second item; retain the beginner-friendly Chinese-source requirement');await page.getByRole('button',{name:'继续任务',exact:true}).click();
  await page.getByText('Synthetic answer 2',{exact:true}).waitFor();
+ const secondResultIds=await page.locator('.task-result-list .citation-id').allTextContents();
+ assert.deepEqual(secondResultIds,[...firstResultIds].reverse(),'Reordered visible results retain source IDs');
+ assert.equal(await page.getByText('Synthetic answer 1',{exact:true}).isVisible(),false);
+ const secondContext=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
+ assert.equal(secondContext.taskContext.objective,'Organize Synthetic Guide; only beginner-friendly Chinese sources');
+ assert.equal(secondContext.taskContext.resultOrder[1].citationId,firstResultIds[1]);
+ await goal().fill('Make a concise reading plan with the same constraints');await page.getByRole('button',{name:'继续任务',exact:true}).click();
+ await page.getByText('Synthetic answer 3',{exact:true}).waitFor();
+ const thirdContext=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
+ assert(thirdContext.taskContext.refinements.includes('Explain the second item; retain the beginner-friendly Chinese-source requirement'));
+ assert.equal(thirdContext.taskContext.resultOrder[1].citationId,secondResultIds[1]);
+ pass('task-first local results precede validated AI sources; follow-up constraints and displayed ordinal IDs survive reordering');
  const sessions=await request('ASSISTANT_SESSIONS');const session=await request('ASSISTANT_GET',{sessionId:sessions[0].id});
- assert.equal(session.messages.length,4);assert.equal(session.messages[1].references[0].citationId,session.messages[3].references[0].citationId);
+ assert.equal(session.messages.length,6);assert.equal(session.messages[1].references[0].citationId,session.messages[3].references[1].citationId);
  assert.equal(session.citations[0].url,'https://example.test/guide?Original=YES#frag');
- const calls=await worker.evaluate(()=>globalThis.__mockCalls);assert.equal(calls.length,2);assert.equal(calls[1].messages.length,4);
+ const calls=await worker.evaluate(()=>globalThis.__mockCalls);assert.equal(calls.length,3);assert.equal(calls[1].messages.length,4);assert.equal(calls[2].messages.length,6);
  await page.reload();await eventually(async()=>assert.equal(await goal().inputValue(),''));await openTool('历史与恢复');
  await page.getByRole('button',{name:/Organize Synthetic Guide/}).click();await page.getByRole('dialog',{name:'历史与恢复',exact:true}).waitFor({state:'hidden'});
- assert.equal(await page.getByRole('dialog',{name:'切换对话',exact:true}).count(),0);await page.getByText('Synthetic answer 2',{exact:true}).waitFor();
- pass('visible two-turn AI composer retains full context, exact URL, stable citation and history after reload');
+ assert.equal(await page.getByRole('dialog',{name:'切换对话',exact:true}).count(),0);await page.getByText('Synthetic answer 3',{exact:true}).waitFor();
+ pass('visible multi-turn AI composer retains full context, exact URL, stable citation and history after reload');
  await page.getByRole('button',{name:'审核整理建议（1）',exact:true}).last().click();
  await page.getByRole('button',{name:'预览已选 AI 建议',exact:true}).click();
  assert.equal((await native(id=>chrome.bookmarks.get(id),ids.guide))[0].parentId,ids.nested);
@@ -474,7 +506,8 @@ try {
  await importDialog.getByRole('button',{name:'关闭',exact:true}).click();await closeDialog(toolsDialog);
  pass('visible same-file import resets to additive, requires review, and restores nested folders with exact leaf URL');
  checkpoint('link-health rendering');
- // Safe health rendering without running any external scan.
+ // The native browser transport runs only against intercepted synthetic HTTP.
+ await assertHealthHttpMatrix({native,request,fixture:healthFixture,root:ids.root,eventually,pass,blockedHttpRequests,onResults:async()=>{await openTool('链接健康');await screenshot('health-controlled-http-matrix');await closeDialog(toolsDialog);},writeEvidence:data=>writeFile(path.join(artifactDir,'health-http-matrix.json'),JSON.stringify(data,null,2))});
  await native(async root=>{await chrome.bookmarks.create({parentId:root,title:'Synthetic unsafe protocol',url:'javascript:void(0)'});},ids.root);await request('SYNC');
  await openTool('链接健康');
  await toolsDialog.getByText('javascript:void(0)',{exact:true}).waitFor();
@@ -485,7 +518,7 @@ try {
  // Historical candidate IDs were deleted and restored under new IDs. Reusing that
  // conversation must fail before transmitting its stale private history.
  const callsBeforeStaleHistory=await worker.evaluate(()=>globalThis.__mockCalls.length);
- await goal().fill('Continue after synthetic recovery');await page.getByRole('button',{name:'继续对话',exact:true}).click();
+ await goal().fill('Continue after synthetic recovery');await page.getByRole('button',{name:'继续任务',exact:true}).click();
  await page.locator('.main-pane > .el-alert').waitFor();
  await eventually(async()=>assert(!(await goal().isDisabled())));
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeStaleHistory);
@@ -494,9 +527,9 @@ try {
  checkpoint('provider failure and cancellation');
  // Provider failures and cancellation retain the user's prompt and allow a later successful retry.
  await worker.evaluate(()=>{globalThis.__mockMode='error';});await goal().fill('Synthetic retry request');
- await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await page.getByText('AI 请求暂时受限，请稍后重试，并检查服务账户的额度与调用频率。',{exact:true}).waitFor();assert.equal(await goal().inputValue(),'Synthetic retry request');
+ await page.getByRole('button',{name:/^(开始任务|继续任务)$/}).click();await page.getByText('AI 请求暂时受限，请稍后重试，并检查服务账户的额度与调用频率。',{exact:true}).waitFor();assert.equal(await goal().inputValue(),'Synthetic retry request');
  const beforeCancelCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);
- await worker.evaluate(()=>{globalThis.__mockMode='stream-gated';});await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();
+ await worker.evaluate(()=>{globalThis.__mockMode='stream-gated';});await page.getByRole('button',{name:/^(开始任务|继续任务)$/}).click();
  await eventually(async()=>assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),beforeCancelCalls+1));
  await provisional.getByText('Synthetic',{exact:true}).waitFor();
  const historyBeforeCancel=await request('ASSISTANT_SESSIONS');
@@ -507,23 +540,66 @@ try {
  assert.deepEqual(await request('ASSISTANT_SESSIONS'),historyBeforeCancel);
  assert.equal(await provisional.count(),0);
  await screenshot('conversation-stream-cancelled');
- await worker.evaluate(()=>{globalThis.__mockMode='ok';});await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await eventually(async()=>assert.equal(await goal().inputValue(),''));
+ await worker.evaluate(()=>{globalThis.__mockMode='ok';});await page.getByRole('button',{name:/^(开始任务|继续任务)$/}).click();await eventually(async()=>assert.equal(await goal().inputValue(),''));
  pass('visible provider error and cancellation preserve the prompt; retry completes successfully');
  checkpoint('selected bookmark scope');
  // Selection scope freezes an explicitly selected native bookmark, independently of search text.
  await search('Synthetic Manual Edited');let scopedRow=page.locator('.results-panel tbody tr').filter({hasText:'Synthetic Manual Edited'});
  await choose(scopedRow.getByRole('checkbox'));await goal().fill('');await page.getByRole('button',{name:'AI 整理所选',exact:true}).click();
- await page.getByRole('button',{name:'询问 AI',exact:true}).click();await eventually(async()=>assert.equal(await goal().inputValue(),''));
+ await page.getByRole('button',{name:'开始任务',exact:true}).click();await eventually(async()=>assert.equal(await goal().inputValue(),''));
  const scopeCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
  assert.equal(scopeCall.scope.bookmarkIds.length,1);assert.equal(scopeCall.bookmarks.length,1);assert.equal(scopeCall.bookmarks[0].title,'Synthetic Manual Edited');
  pass('selected-bookmark AI task transmits exactly the frozen selection, not all search results');
+ checkpoint('virtual themes and task resume');
+ await page.getByRole('button',{name:'新任务',exact:true}).click();
+ await page.getByRole('combobox',{name:'新任务的书签范围',exact:true}).click();
+ await page.getByRole('option',{name:'全部书签',exact:true}).click();
+ const treeBeforeThemes=await native(()=>chrome.bookmarks.getTree());
+ await worker.evaluate(()=>{globalThis.__mockMode='theme';});
+ await goal().fill('Group my synthetic reading sources into a useful theme');
+ await page.getByRole('button',{name:'开始任务',exact:true}).click();
+ const themes=page.getByRole('navigation',{name:'虚拟主题视图',exact:true});
+ await themes.getByRole('button',{name:'Synthetic AI Folder · 2',exact:true}).waitFor();
+ await themes.getByText('不改变原生目录',{exact:true}).waitFor();
+ await themes.getByRole('button',{name:'Synthetic AI Folder · 2',exact:true}).click();
+ assert.equal(await page.locator('.results-panel tbody tr').count(),2);
+ await page.getByText(/虚拟主题 · 2 个书签/).waitFor();
+ assert.deepEqual(await native(()=>chrome.bookmarks.getTree()),treeBeforeThemes);
+ await screenshot('virtual-theme-without-native-mutation');
+ await themes.getByRole('button',{name:'隐藏主题 Synthetic AI Folder',exact:true}).click();
+ await page.reload();await goal().waitFor();
+ assert.equal(await themes.getByRole('button',{name:'Synthetic AI Folder · 2',exact:true}).count(),0);
+ await page.getByRole('button',{name:'新任务',exact:true}).click();
+ const recent=page.getByLabel('最近任务',{exact:true});
+ await recent.getByRole('button',{name:/Group my synthetic reading sources/}).click();
+ await page.getByRole('region',{name:'本轮来源引用',exact:true}).waitFor();
+ assert.equal(await page.locator('.task-result-list li').count(),2);
+ assert.deepEqual(await native(()=>chrome.bookmarks.getTree()),treeBeforeThemes);
+ await worker.evaluate(()=>{globalThis.__mockMode='ok';});
+ pass('virtual themes group validated suggestions without native mutation; dismissal persists and recent task resumes');
+ checkpoint('review conflicts preserve concurrent native changes');
+ await search('Synthetic Manual Edited');
+ const conflictRow=page.locator('.results-panel tbody tr').filter({hasText:'Synthetic Manual Edited'});
+ await conflictRow.getByRole('button',{name:'编辑',exact:true}).click();
+ const conflictEditor=page.getByRole('dialog',{name:'编辑书签',exact:true});
+ await conflictEditor.locator('#bookmark-editor-title').fill('Synthetic proposed overwrite');
+ await conflictEditor.getByRole('button',{name:'预览更改',exact:false}).click();
+ await exportPlan('synthetic-conflict-backup.json');
+ await native(id=>chrome.bookmarks.update(id,{title:'Synthetic concurrent native edit'}),manual.id);
+ await choose(page.locator('.approval-box').getByRole('checkbox',{name:'已逐项核对并批准以上更改',exact:true}));
+ await page.locator('.approval-box').getByRole('button',{name:/^批准并执行/}).click();
+ await page.getByText(/书签或会话已变化|原生书签已变化/).first().waitFor();
+ assert.equal((await native(id=>chrome.bookmarks.get(id),manual.id))[0].title,'Synthetic concurrent native edit');
+ assert.equal((await native(()=>chrome.bookmarks.search({title:'Synthetic proposed overwrite'}))).length,0);
+ await screenshot('native-conflict-blocks-overwrite');
+ pass('reviewed snapshot conflict blocks stale writes and preserves a concurrent native edit');
  await browse();await search('');
  // The product debounces local filtering by 200ms. Await the actual complete
  // result set before responsive evidence, rather than capturing old filtered rows.
  const clearedResults=await request('BOOKMARKS_LIST',{query:'',limit:200,offset:0});
  await eventually(async()=>assert.equal(await page.locator('.results-panel tbody tr').count(),clearedResults.rows.length));
- for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('workspace '+width);await page.locator('.goal-form').scrollIntoViewIfNeeded();await reachable(page.getByRole('button',{name:'本地搜索',exact:true}),'local search '+width);await screenshot('workspace-'+width);}
- await goal().focus();await page.keyboard.type('Synthetic Guide');await page.getByRole('button',{name:'本地搜索',exact:true}).click();
+ for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('workspace '+width);await page.locator('.goal-form').scrollIntoViewIfNeeded();await reachable(page.getByRole('button',{name:'仅本地搜索',exact:true}),'local search '+width);await screenshot('workspace-'+width);}
+ await goal().focus();await page.keyboard.type('Synthetic Guide');await page.getByRole('button',{name:'仅本地搜索',exact:true}).click();
  await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();await page.keyboard.press('Tab');assert(await page.evaluate(()=>document.activeElement!==document.body));
  pass('workspace responsive screenshots and keyboard-driven local search work');
  checkpoint('sidepanel responsive rendering');
@@ -566,6 +642,7 @@ try {
  pass('native popup offers inline advice only after local lookup; applying each field leaves the other untouched and never saves');
  await popup.getByLabel('标题',{exact:true}).fill('Synthetic Quick Save');
  await popup.getByRole('button',{name:'确认收藏',exact:true}).click();await popup.getByRole('button',{name:'✓ 已收藏',exact:true}).waitFor();
+ await popup.locator('.lookup > summary').click();
  await popup.getByRole('searchbox',{name:'搜索已有书签',exact:true}).fill('Synthetic Quick Save');
  await popup.getByRole('button',{name:/Synthetic Quick Save.*example\.test/}).waitFor();
  const quick=(await native(()=>chrome.bookmarks.search({title:'Synthetic Quick Save'})))[0];assert.equal(quick.url,'https://example.test/capture?Keep=YES#frag');
@@ -612,6 +689,20 @@ try {
  await unknownPopup.close();
  pass('native lookup retry recovers inline advice without saving a bookmark');
  pass('failed native capture lookup pauses automatic advice instead of treating unknown status as a new bookmark');
+ checkpoint('one-click capture while AI is pending');
+ await sourcePage.goto('https://example.test/fast-capture');
+ await worker.evaluate(()=>{globalThis.__mockMode='wait';});
+ const fastPopup=await openNativePopup();
+ await fastPopup.getByText('正在看看有没有更合适的标题和位置…',{exact:true}).waitFor();
+ const fastSave=fastPopup.getByRole('button',{name:'确认收藏',exact:true});
+ assert.equal(await fastSave.isEnabled(),true,'Pending advice cannot disable local capture');
+ await fastSave.click();
+ await fastPopup.getByRole('button',{name:'✓ 已收藏',exact:true}).waitFor();
+ const fastSaved=await native(()=>chrome.bookmarks.search({url:'https://example.test/fast-capture'}));
+ assert.equal(fastSaved.length,1);assert.equal(fastSaved[0].title,'Synthetic capture page');
+ await screenshot('popup-save-without-ai-delay',fastPopup,false);
+ await fastPopup.close();await worker.evaluate(()=>{globalThis.__mockMode='ok';});
+ pass('one-click native capture completes with unchanged title while AI response is indefinitely pending');
  assert.deepEqual(errors,[]);pass('no uncaught workspace page errors');
  assert.deepEqual(captureErrors,[],'Functional checks completed but visual evidence is incomplete; see capture-errors.json');
  await writeFile(path.join(artifactDir,'report.json'),JSON.stringify(report({status:'passed'}),null,2));

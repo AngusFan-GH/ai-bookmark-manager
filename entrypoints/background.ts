@@ -1,3 +1,4 @@
+import { createHealthBrowserFetch } from '../src/infrastructure/browser/health-fetch';
 import { attachAssistantStreamPort } from '../src/infrastructure/messaging/assistant-stream-port';
 import { executeWithIndexRefresh } from '../src/infrastructure/messaging/execution-refresh';
 import { registerWorkspaceHandlers, scopedBookmarks } from '../src/infrastructure/messaging/workspace-handlers';
@@ -121,13 +122,6 @@ function healthPermissionStatus(): Promise<boolean> {
   });
 }
 
-function parseRetryAfter(header: string | null): number | null {
-  if (!header) return null;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds;
-  const at = Date.parse(header);
-  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - Date.now()) / 1000));
-}
 
 /**
  * Walk a chrome.bookmarks tree and return the node with the given id
@@ -378,56 +372,7 @@ export default defineBackground(() => {
     latestChecks: async () => db.linkChecks.toArray(),
     saveCheck: async (rec: LinkCheckRecord) => { await db.linkChecks.put(rec); },
     canFetch: containsHealthPermission,
-    fetch: async (req) => {
-      // Real browser fetch. AbortSignal is honored. Response body is
-      // capped at req.maxResponseBytes.
-      if (req.signal?.aborted) throw new DOMException('Request aborted', 'AbortError');
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), req.timeoutMs);
-      const onAbort = () => ac.abort();
-      req.signal?.addEventListener('abort', onAbort, { once: true });
-      try {
-        const res = await fetch(req.url, {
-          method: req.method,
-          credentials: 'omit',
-          cache: 'no-store',
-          // Never allow the browser to silently follow a redirect to a host
-          // that has not gone through our static guard and permission check.
-          redirect: 'manual',
-          signal: ac.signal,
-        });
-        if (res.type === 'opaqueredirect') {
-          return { status: 0, url: req.url, retryAfterSec: null, redirectBlocked: true };
-        }
-        const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
-        let body: string | undefined;
-        if (req.method === 'GET' && res.body) {
-          const reader = res.body.getReader();
-          const chunks: Uint8Array[] = [];
-          let received = 0;
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            if (value) {
-              received += value.byteLength;
-              if (received > req.maxResponseBytes) { await reader.cancel().catch(() => undefined); break; }
-              chunks.push(value);
-            }
-          }
-          const decoder = new TextDecoder();
-          body = chunks.map((c) => decoder.decode(c, { stream: true })).join('');
-        }
-        return {
-          status: res.status,
-          url: res.url,
-          retryAfterSec: retryAfter,
-          ...(body !== undefined ? { body } : {}),
-        };
-      } finally {
-        clearTimeout(t);
-        req.signal?.removeEventListener('abort', onAbort);
-      }
-    },
+    fetch: createHealthBrowserFetch(),
     config: {
       defaultTimeoutMs: DEFAULT_HEALTH_CONFIG.timeoutMs,
       defaultMaxRedirects: DEFAULT_HEALTH_CONFIG.maxRedirects,

@@ -99,7 +99,7 @@ function service(fetch: HealthServiceDeps['fetch'], saved: LinkCheckRecord[], ma
 describe('health evidence counting', () => {
   it('does not classify retry count as repeated dead-link evidence', () => {
     expect(classify({ httpCode: 404, attempts: 10 }).status).toBe('suspected_dead');
-    expect(classify({ httpCode: 410, priorDeadResponses: 1 }).status).toBe('confirmed_dead');
+    expect(classify({ httpCode: 410, priorDeadResponses: 1 }).status).toBe('repeated_not_found');
   });
   it.each([404, 410])('does not confirm a single %s after a network failure', async (code) => {
     vi.useFakeTimers();
@@ -115,7 +115,7 @@ describe('health evidence counting', () => {
     const fetch = vi.fn(async () => response(404));
     const svc = service(fetch, saved);
     await svc.start(); await vi.runAllTimersAsync();
-    expect(saved[0].status).toBe('confirmed_dead'); expect(fetch).toHaveBeenCalledTimes(4);
+    expect(saved[0].status).toBe('repeated_not_found'); expect(fetch).toHaveBeenCalledTimes(4);
   });
   it('cancellation during HEAD prevents service GET and persistence', async () => {
     vi.useFakeTimers();

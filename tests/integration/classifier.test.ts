@@ -16,10 +16,10 @@ describe('classify — 2xx', () => {
 });
 
 describe('classify — 3xx', () => {
-  it('returns redirected for 301/302/307', () => {
-    expect(classify({ httpCode: 301 }).status).toBe('redirected');
-    expect(classify({ httpCode: 302 }).status).toBe('redirected');
-    expect(classify({ httpCode: 307 }).status).toBe('redirected');
+  it('returns redirect_pending for 301/302/307', () => {
+    expect(classify({ httpCode: 301 }).status).toBe('redirect_pending');
+    expect(classify({ httpCode: 302 }).status).toBe('redirect_pending');
+    expect(classify({ httpCode: 307 }).status).toBe('redirect_pending');
   });
 });
 
@@ -41,14 +41,14 @@ describe('classify — 4xx', () => {
   it('suspected_dead for first 404', () => {
     expect(classify({ httpCode: 404, attempts: 0 }).status).toBe('suspected_dead');
   });
-  it('confirmed_dead for 404 after retry', () => {
-    expect(classify({ httpCode: 404, priorDeadResponses: 1 }).status).toBe('confirmed_dead');
+  it('repeated_not_found for 404 after retry', () => {
+    expect(classify({ httpCode: 404, priorDeadResponses: 1 }).status).toBe('repeated_not_found');
   });
   it('suspected_dead for first 410', () => {
     expect(classify({ httpCode: 410, attempts: 0 }).status).toBe('suspected_dead');
   });
-  it('confirmed_dead for 410 after retry', () => {
-    expect(classify({ httpCode: 410, priorDeadResponses: 2 }).status).toBe('confirmed_dead');
+  it('repeated_not_found for 410 after retry', () => {
+    expect(classify({ httpCode: 410, priorDeadResponses: 2 }).status).toBe('repeated_not_found');
   });
 });
 

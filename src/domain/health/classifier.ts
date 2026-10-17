@@ -2,21 +2,9 @@
 //
 // HealthClassifier — turn a fetch outcome into a LinkStatus.
 //
-// Pure function. The dev guide § 3.4 lays out the state machine
-// carefully:
-//   - 200 ⇒ healthy
-//   - 3xx (followed) ⇒ redirected
-//   - 401/407 ⇒ auth_required (NOT dead)
-//   - 403 ⇒ forbidden (NOT dead; some sites return 403 to all bots)
-//   - 429 ⇒ rate_limited, surface Retry-After
-//   - 404/410 first hit ⇒ suspected_dead; after retries / time window
-//     ⇒ confirmed_dead
-//   - 5xx and network errors ⇒ network_error (retryable)
-//
-// We do NOT make the "first hit → confirmed_dead" transition here.
-// The classifier returns suspected_dead for a single 404/410. The
-// scheduler supplies explicit prior 404/410 evidence for promotion;
-// unrelated retries never count. The classifier is conservative.
+// Pure evidence classification: repeated 404/410 observations request review,
+// never establish permanent death. Redirects that were not followed stay unknown.
+// Authentication, rate limits, server and network failures are not deletion evidence.
 
 import type { HealthInputs, HealthClassification, HealthCheckOutcome } from './types';
 
@@ -34,15 +22,14 @@ export function classify(inputs: HealthInputs): HealthClassification {
 
   // 2. 2xx
   if (code >= 200 && code < 300) {
+    if (inputs.contentSignal === 'soft_404') return { status: 'suspected_soft_404', reason: '2xx response with error-page heading; manual review required' };
+    if (inputs.contentSignal === 'login') return { status: 'suspected_login', reason: '2xx response with login-page signals; manual review required' };
     return { status: 'healthy', reason: `${code} OK` };
   }
 
-  // 3. 3xx — we only call classify after the fetch client has
-  //    followed redirects to the final destination, so a 3xx here
-  //    means the final hop was a 3xx. Treat as redirected but mark
-  //    as healthy(ish) — the bookmark is alive.
+  // A final 3xx is an unresolved destination, not a successful page check.
   if (code >= 300 && code < 400) {
-    return { status: 'redirected', reason: `${code} ${redirectText(code)}` };
+    return { status: 'redirect_pending', reason: `${code} ${redirectText(code)}` };
   }
 
   // 4. 401/407 — auth required, NOT dead
@@ -67,7 +54,7 @@ export function classify(inputs: HealthInputs): HealthClassification {
   // 7. 404 / 410
   if (code === 404 || code === 410) {
     if (priorDeadResponses >= 1) {
-      return { status: 'confirmed_dead', reason: `${code} ${statusText(code)} after retry` };
+      return { status: 'repeated_not_found', reason: `${code} observed on repeated GET probes; not proof of permanent removal` };
     }
     return { status: 'suspected_dead', reason: `${code} ${statusText(code)}` };
   }
@@ -114,6 +101,6 @@ function redirectText(code: number): string {
  */
 export const CLASSIFIER_OUTCOMES: readonly HealthCheckOutcome[] = [
   'healthy', 'redirected', 'auth_required', 'forbidden',
-  'rate_limited', 'suspected_dead', 'confirmed_dead',
+  'rate_limited', 'suspected_dead', 'repeated_not_found', 'suspected_soft_404', 'suspected_login', 'redirect_pending',
   'network_error', 'unsupported',
 ];

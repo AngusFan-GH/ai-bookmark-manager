@@ -98,7 +98,7 @@ describe('popup quick actions',()=>{
     mocks.query.mockResolvedValue([{windowId:7,title:'Settings',url:'chrome://settings'}]);await mount();expect(host.textContent).toContain('这个页面无法快捷收藏');expect(host.querySelector('.primary')).toBeNull();expect(mocks.prepareOrganization).not.toHaveBeenCalled();
   });
   it('opens the side panel directly from user interaction with current search',async()=>{
-    await mount();await search('design');await click('侧边栏工作台');expect(mocks.open).toHaveBeenCalledWith({windowId:7});expect(mocks.setOptions).toHaveBeenCalledWith({path:'sidepanel.html?q=design',enabled:true});expect(mocks.open.mock.invocationCallOrder[0]).toBeLessThan(mocks.setOptions.mock.invocationCallOrder[0]);
+    await mount();await search('design');await click('在侧边栏继续任务 →');expect(mocks.open).toHaveBeenCalledWith({windowId:7});expect(mocks.setOptions).toHaveBeenCalledWith({path:'sidepanel.html?q=design',enabled:true});expect(mocks.open.mock.invocationCallOrder[0]).toBeLessThan(mocks.setOptions.mock.invocationCallOrder[0]);
   });
   it.each(['hasKey','consent','autoSuggestions','connectionTested'])('does not send metadata without %s',async missing=>{
     mocks.getAssistantSettings.mockResolvedValue({...enabled,[missing]:false});await mount();await vi.advanceTimersByTimeAsync(900);expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect(host.textContent).toContain('设置 AI');expect((host.querySelector('.primary') as HTMLButtonElement).disabled).toBe(false);

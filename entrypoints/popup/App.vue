@@ -179,15 +179,7 @@ async function openBookmark(bookmark: BookmarkRecord) {
 </script>
 <template>
   <main class="popup">
-    <header><span class="logo">✦</span><div><h1>书签工作台</h1><p>收好当下，随时找到</p></div><button class="text-button" aria-label="打开完整工作台" @click="openWorkspace">↗</button></header>
-    <form class="search" @submit.prevent="openWorkspace"><input v-model="query" autofocus type="search" aria-label="搜索已有书签" placeholder="搜索已有书签…"><button type="submit" aria-label="在工作台查看全部结果">↵</button></form>
-    <section v-if="query.trim()" class="results" aria-live="polite" aria-label="本地搜索结果">
-      <p v-if="searching" class="muted">正在搜索本地书签…</p>
-      <p v-else-if="searchError" role="alert" class="error">{{ searchError }}</p>
-      <p v-else-if="searched && !rows.length" class="muted">未找到书签，试试其他关键词。</p>
-      <button v-for="row in rows" :key="row.id" class="result" :disabled="!isWebUrl(row.url)" @click="openBookmark(row)"><strong>{{ row.title || row.url }}</strong><span>{{ row.url }}</span></button>
-      <button v-if="rows.length" class="text-button all-results" @click="openWorkspace">在工作台查看全部结果 →</button>
-    </section>
+    <header><span class="logo">✦</span><div><h1>书签工作台</h1><p>收好当下，随时找到</p></div><button class="text-button" aria-label="打开侧边栏工作台" :disabled="windowId === undefined" @click="openSidepanel">打开工作台 →</button></header>
     <section class="capture" aria-label="收藏当前页面">
       <div class="section-title"><h2>{{ saved || existingBookmarks.length ? '已收藏当前页面' : '收藏当前页面' }}</h2><span class="badge">本地保存</span></div>
       <p v-if="loading" class="muted">正在读取当前页面…</p>
@@ -206,6 +198,7 @@ async function openBookmark(bookmark: BookmarkRecord) {
         <div class="ai-row"><span class="privacy" role="status">{{ suggesting ? '正在看看有没有更合适的标题和位置…' : '' }}</span><button v-if="!saved && !executionAttempted" class="text-button" :disabled="busy || openingEditor" @click="editInWorkspace">{{ openingEditor ? '正在打开…' : '更多编辑' }}</button></div>
         <p v-if="confirmedUnsaved && !autoEnabled" class="privacy">需要标题和目录建议？<button class="text-button" @click="openSettings">设置 AI</button></p>
         <p v-if="confirmedUnsaved && autoEnabled && !suggesting && !advice && !adviceError && automaticRequests >= 3" class="privacy">可以按当前内容直接收藏。</p>
+        <button v-if="advice" class="text-button dismiss-advice" @click="invalidateAdvice">忽略本次建议</button>
         <p v-if="adviceError && confirmedUnsaved" class="privacy">暂时没有建议，不影响收藏。<button class="text-button" :disabled="busy || saved" @click="suggest">重试建议</button></p>
         <button class="primary" :disabled="!canSave" @click="save">{{ saved ? '✓ 已收藏' : busy ? '正在安全保存…' : executionAttempted ? '请到工作台核对结果' : existingBookmarks.length ? '确认另存一份' : '确认收藏' }}</button>
         <p v-if="executionAttempted && !saved && !busy" class="privacy" role="status">保存结果尚未确认，请先核对操作历史，避免重复收藏。<button class="text-button" @click="openWorkspace">打开工作台核对</button></p>
@@ -213,8 +206,18 @@ async function openBookmark(bookmark: BookmarkRecord) {
         <p v-else class="privacy">确认后写入浏览器书签，并自动保留操作前快照。</p>
       </template>
     </section>
+    <details class="lookup"><summary>查找其他已收藏页面</summary>
+    <form class="search" @submit.prevent="openWorkspace"><input v-model="query" type="search" aria-label="搜索已有书签" placeholder="搜索已有书签…"><button type="submit" aria-label="在工作台查看全部结果">↵</button></form>
+    <section v-if="query.trim()" class="results" aria-live="polite" aria-label="本地搜索结果">
+      <p v-if="searching" class="muted">正在搜索本地书签…</p>
+      <p v-else-if="searchError" role="alert" class="error">{{ searchError }}</p>
+      <p v-else-if="searched && !rows.length" class="muted">未找到书签，试试其他关键词。</p>
+      <button v-for="row in rows" :key="row.id" class="result" :disabled="!isWebUrl(row.url)" @click="openBookmark(row)"><strong>{{ row.title || row.url }}</strong><span>{{ row.url }}</span></button>
+      <button v-if="rows.length" class="text-button all-results" @click="openWorkspace">在工作台查看全部结果 →</button>
+    </section>
+    </details>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <footer><button :disabled="windowId === undefined" @click="openSidepanel">侧边栏工作台</button><button @click="openWorkspace">完整工作台 ↗</button></footer>
+    <footer><button :disabled="windowId === undefined" @click="openSidepanel">在侧边栏继续任务 →</button><button @click="openWorkspace">完整工作台 ↗</button></footer>
   </main>
 </template>
 <style scoped>
@@ -275,4 +278,5 @@ footer button{border:0;background:none;color:var(--bookmark-secondary);font-size
 footer { border-top:1px solid var(--bookmark-line); padding-top:10px; }
 
 footer button { min-height:32px; }
+.lookup{margin-top:16px}.lookup>summary{cursor:pointer;color:var(--bookmark-secondary);font-size:12px;padding:8px 0}.capture{margin-top:0;border:0;border-radius:0;padding:0}.dismiss-advice{margin-top:8px}header .text-button{max-width:110px;text-align:right}
 </style>

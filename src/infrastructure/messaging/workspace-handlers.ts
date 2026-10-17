@@ -1,3 +1,4 @@
+import { buildTopicViews } from '../../domain/organization/topics';
 import {findExactNativeBookmarks, serializeCaptureUrl} from './capture-lookup';
 import type {RawBookmarkNode} from '../../domain/bookmarks/types';
 import type { BackgroundRouter } from './background-router';
@@ -227,6 +228,15 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     })
     .register('ASSISTANT_SESSIONS',async () => (await db.meta.where('key').startsWith(SESSION_PREFIX).toArray())
       .map(row=>row.value as AssistantSession).sort((a,b)=>b.updatedAt-a.updatedAt).map(s=>({id:s.id,mode:s.mode,scope:s.scope,updatedAt:s.updatedAt,title:s.messages.find(m=>m.role==='user')?.text.slice(0,80)||'新任务'})))
+    .register('ORGANIZATION_TOPICS',async () => {
+      const [rows,bookmarks,folders] = await Promise.all([db.meta.where('key').startsWith(SESSION_PREFIX).toArray(),outboundRepository.listBookmarks(),outboundRepository.listFolders()]);
+      const sessions = rows.map(row => row.value as AssistantSession).sort((a,b) => b.updatedAt-a.updatedAt).slice(0,12);
+      const messages = sessions.flatMap(session => session.messages).sort((a,b) => a.createdAt-b.createdAt);
+      return buildTopicViews(messages,bookmarks,folders).map(view => ({...view,bookmarks:view.bookmarkIds.map(id => {
+        const {contentSnippet:_snippet,...bookmark} = bookmarks.find(bookmark => bookmark.id === id)!;
+        return bookmark;
+      })}));
+    })
     .register('ASSISTANT_CREATE',async req => sessionView(await service.createSession(req.input)))
     .register('ASSISTANT_GET',async req => {await settlements.get(req.sessionId);const s=await repository.getSession(req.sessionId);if(!s) throw new Error('对话不存在');return sessionView(s);})
     .register('ASSISTANT_TURN',async (req,context) => {

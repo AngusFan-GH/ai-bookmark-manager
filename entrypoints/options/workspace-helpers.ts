@@ -127,3 +127,38 @@ export function workspaceErrorLabel(error:unknown):string {
   if(/至少.*保留/i.test(message))return '每组至少需要保留一个书签。';
   return '操作未完成。请刷新后重试；AI 请求请检查密钥、区域和网络设置。';
 }
+
+/** Dismissal is local presentation state and must never block a task or save. */
+export function readDismissedViews(storage: Pick<Storage,'getItem'>, key: string): string[] {
+  try { const value:unknown=JSON.parse(storage.getItem(key)??'[]');return Array.isArray(value)?value.filter((id):id is string=>typeof id==='string').slice(-200):[]; } catch { return []; }
+}
+export function persistDismissedViews(storage: Pick<Storage,'setItem'>, key: string, ids: string[]): void {
+  try { storage.setItem(key,JSON.stringify([...new Set(ids)].slice(-200))); } catch { /* Storage can be disabled; dismissal still works in this view. */ }
+}
+/** Non-secret stable presentation key; do not persist bookmark URLs or task text. */
+export function presentationKey(value: string): string {
+  let hash=2166136261;for(const char of value){hash^=char.charCodeAt(0);hash=Math.imul(hash,16777619);}return (hash>>>0).toString(36);
+}
+
+/** Rebuild through the plan service; never alter an approved plan or reuse approval. */
+export function excludePlanStep(steps: OperationStep[], excludedId: string): OrganizationInput['steps'] {
+  if(!steps.some(step=>step.id===excludedId))throw new Error('计划步骤已变化，请重新预览。');
+  const excluded=new Set([excludedId]);
+  let changed=true;
+  while(changed){changed=false;for(const step of steps){
+    const dependencyRemoved=(step.dependsOn??[]).some(id=>excluded.has(id))||(step.parentStepId&&excluded.has(step.parentStepId));
+    // Keeping a descendant must also keep its containing folder. Never recreate
+    // a parent deletion that would silently remove an excluded child.
+    const containsKeptChild=step.action==='delete'&&steps.some(child=>excluded.has(child.id)&&child.expectedBefore.parentId===step.targetBrowserId);
+    if(!excluded.has(step.id)&&(dependencyRemoved||containsKeptChild)){excluded.add(step.id);changed=true;}
+  }}
+  const remaining=steps.filter(step=>!excluded.has(step.id));
+  return remaining.map(step=>{
+    const desiredAfter:NonNullable<OrganizationInput['steps'][number]['desiredAfter']>={};
+    if(typeof step.desiredAfter.title==='string')desiredAfter.title=step.desiredAfter.title;
+    if(typeof step.desiredAfter.url==='string')desiredAfter.url=step.desiredAfter.url;
+    if(typeof step.desiredAfter.index==='number')desiredAfter.index=step.desiredAfter.index;
+    return {action:step.action,...(step.targetBrowserId?{targetBrowserId:step.targetBrowserId}:{}),
+      ...(step.parentStepId?{parentStepIndex:remaining.findIndex(parent=>parent.id===step.parentStepId)}:step.parentBrowserId?{parentBrowserId:step.parentBrowserId}:{}),desiredAfter,reason:step.reason};
+  });
+}

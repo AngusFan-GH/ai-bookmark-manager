@@ -176,3 +176,53 @@ it('does not save an import plan when preview metadata capture fails', async()=>
  expect(f.snapshots).toHaveLength(0);expect(await f.deps.plansStore.list()).toHaveLength(0);
  expect(f.deps.bookmarksApi.create).not.toHaveBeenCalled();
 });
+
+describe('suggestion and exact-duplicate evidence binding',()=>{
+ const source={bookmarkId:'b',title:'Old',url:'https://example.test',path:'Bookmarks',parentId:'1'};
+ it.each(['title','url','parentId'] as const)('rejects a stale AI %s before preview is persisted',async key=>{
+  const f=fixture();f.find('b')![key]='changed';
+  await expect(f.service.draftOrganization({evidence:{bookmarks:[source]},steps:[{action:'delete',targetBrowserId:'b'}]})).rejects.toMatchObject({code:'PLAN_STALE'});
+  expect(f.snapshots).toHaveLength(0);expect(f.deps.bookmarksApi.remove).not.toHaveBeenCalled();
+ });
+ it('rejects missing evidence for any proposed target',async()=>{
+  const f=fixture();await expect(f.service.draftOrganization({evidence:{bookmarks:[]},steps:[{action:'rename',targetBrowserId:'b',desiredAfter:{title:'AI'}}]})).rejects.toMatchObject({code:'PLAN_STALE'});
+ });
+ function duplicates(){
+  const f=fixture();f.tree[0].children![0].children!.push({id:'survivor',title:'Keep',parentId:'1',url:source.url});
+  const evidence={bookmarks:[source,{...source,bookmarkId:'survivor',title:'Keep'}],exactDuplicateGroups:[{url:source.url,bookmarkIds:['b','survivor']}]};
+  return {...f,evidence};
+ }
+ it('rejects duplicates whose target became unique before preview',async()=>{
+  const f=duplicates();f.find('b')!.url='https://unique.test';
+  await expect(f.service.draftOrganization({evidence:f.evidence,steps:[{action:'delete',targetBrowserId:'b'}]})).rejects.toMatchObject({code:'PLAN_STALE'});
+ });
+ it('rejects stale survivor metadata before preview',async()=>{
+  const f=duplicates();f.find('survivor')!.url='https://unique.test';
+  await expect(f.service.draftOrganization({evidence:f.evidence,steps:[{action:'delete',targetBrowserId:'b'}]})).rejects.toMatchObject({code:'PLAN_STALE'});
+ });
+ it('refuses selecting every exact duplicate',async()=>{
+  const f=duplicates();await expect(f.service.draftOrganization({evidence:f.evidence,steps:[{action:'delete',targetBrowserId:'b'},{action:'delete',targetBrowserId:'survivor'}]})).rejects.toMatchObject({code:'PLAN_STALE'});
+ });
+ it('persists evidence and rechecks survivor changes between preview and execution',async()=>{
+  const f=duplicates();const plan=await f.service.draftOrganization({evidence:f.evidence,steps:[{action:'delete',targetBrowserId:'b'}]});
+  expect(JSON.parse(plan.metadata['plan-service.evidence'])).toEqual(f.evidence);
+  const approval=await f.service.approve(plan.id);f.find('survivor')!.url='https://unique.test';
+  await expect(f.service.execute(plan.id,approval.token)).rejects.toMatchObject({code:'PLAN_STALE'});
+  expect(f.deps.bookmarksApi.remove).not.toHaveBeenCalled();
+ });
+});
+
+
+it.each(['remove','replace'] as const)('invalidates approval when duplicate evidence is %s',async mutation=>{
+ const f=fixture();f.tree[0].children![0].children!.push({id:'survivor',title:'Keep',parentId:'1',url:'https://example.test'});
+ const evidence={bookmarks:[{bookmarkId:'b',title:'Old',url:'https://example.test',path:'Bar',parentId:'1'},{bookmarkId:'survivor',title:'Keep',url:'https://example.test',path:'Bar',parentId:'1'}],exactDuplicateGroups:[{url:'https://example.test',bookmarkIds:['b','survivor']}]};
+ const plan=await f.service.draftOrganization({evidence,steps:[{action:'delete',targetBrowserId:'b'}]});
+ const approval=await f.service.approve(plan.id);
+ const tampered=(await f.deps.plansStore.get(plan.id))!;
+ if(mutation==='remove')delete tampered.metadata['plan-service.evidence'];
+ else tampered.metadata['plan-service.evidence']=JSON.stringify({bookmarks:evidence.bookmarks.slice(0,1)});
+ await f.deps.plansStore.put(tampered);
+ f.find('survivor')!.url='https://now-unique.test';
+ await expect(f.service.execute(plan.id,approval.token)).rejects.toMatchObject({code:'PLAN_STALE'});
+ expect(f.deps.bookmarksApi.remove).not.toHaveBeenCalled();
+});

@@ -123,7 +123,7 @@ describe('HealthService — start', () => {
     }
     expect(getCalls).toBe(2);
     expect(saved).toEqual(expect.arrayContaining([
-      expect.objectContaining({ bookmarkId: 'b1', status: 'confirmed_dead' }),
+      expect.objectContaining({ bookmarkId: 'b1', status: 'repeated_not_found' }),
     ]));
   });
 

@@ -19,7 +19,7 @@ export function assertSafePromptUrls(text:string):void {
 }
 
 /** Historical candidates (including uncited ones) must still satisfy today's privacy scope. */
-export function historySafeForAssistant(history:Array<{role:string;content:string}>|undefined,bookmarks:Array<{id:string;url?:string}>,folders:Array<{id:string}>):boolean{
+export function historySafeForAssistant(history:Array<{role:string;content:string}>|undefined,bookmarks:Array<{id:string;url?:string;title?:string;path?:string}>,folders:Array<{id:string}>):boolean{
  if(!Array.isArray(history))return false;
  const allowedBookmarks=new Map(bookmarks.map(b=>[b.id,b]));const allowedFolders=new Set(folders.map(f=>f.id));
  for(const message of history){
@@ -31,7 +31,10 @@ export function historySafeForAssistant(history:Array<{role:string;content:strin
   for(const item of payload.bookmarks){
    if(!item||typeof item.bookmarkId!=='string'||typeof item.url!=='string'||!allowedBookmarks.has(item.bookmarkId)||!safeForAssistant(item.url))return false;
    // If the user changed a URL, do not resend an earlier private resource by stale ID.
-   if(allowedBookmarks.get(item.bookmarkId)?.url?.slice(0,2000)!==item.url)return false;
+   const current=allowedBookmarks.get(item.bookmarkId)!;
+   if(current.url?.slice(0,2000)!==item.url)return false;
+   if(current.title!==undefined && item.title!==current.title.slice(0,300))return false;
+   if(current.path!==undefined && item.path!==current.path.slice(0,500))return false;
   }
   for(const folder of payload.existingFolders)if(!folder||typeof folder.id!=='string'||!allowedFolders.has(folder.id))return false;
  }

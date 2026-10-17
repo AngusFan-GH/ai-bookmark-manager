@@ -1,17 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { backupFileName, confirmedRemovalRecords, healthEmptyText } from '../../entrypoints/options/components/tools-helpers';
+import type { HealthObservation } from '../../src/domain/health/types';
 import type { BookmarkRecord } from '../../src/domain/bookmarks/types';
 const record = (id: string, url = 'https://saved.test') => ({ id, url, kind:'bookmark', syncGeneration:3 }) as BookmarkRecord;
+const observations: HealthObservation[] = [1, 1001].map(checkedAt => ({checkedAt, method:'GET', httpCode:404, status:'suspected_dead', evidence:[]}));
 describe('safe health cleanup selection', () => {
-  it('only includes explicitly selected current confirmed dead records', () => {
+  it('only includes explicitly selected current records with repeated GET evidence', () => {
     const records = [record('dead'), record('suspected'), record('other')];
-    expect(confirmedRemovalRecords(['dead','suspected'], [{bookmarkId:'dead',status:'confirmed_dead',url:'https://saved.test',syncGeneration:3},{bookmarkId:'suspected',status:'suspected_dead',url:'https://saved.test',syncGeneration:3},{bookmarkId:'other',status:'confirmed_dead',url:'https://saved.test',syncGeneration:3}],records).map(r=>r.id)).toEqual(['dead']);
+    expect(confirmedRemovalRecords(['dead','suspected'], [{bookmarkId:'dead',status:'repeated_not_found',observations,url:'https://saved.test',syncGeneration:3},{bookmarkId:'suspected',status:'suspected_dead',url:'https://saved.test',syncGeneration:3},{bookmarkId:'other',status:'repeated_not_found',observations,url:'https://saved.test',syncGeneration:3}],records).map(r=>r.id)).toEqual(['dead']);
   });
   it('rejects old URL and generation evidence', () => {
-    expect(confirmedRemovalRecords(['a','b'],[{bookmarkId:'a',status:'confirmed_dead',url:'https://old.test',syncGeneration:3},{bookmarkId:'b',status:'confirmed_dead',url:'https://saved.test',syncGeneration:2}],[record('a'),record('b')])).toEqual([]);
+    expect(confirmedRemovalRecords(['a','b'],[{bookmarkId:'a',status:'repeated_not_found',observations,url:'https://old.test',syncGeneration:3},{bookmarkId:'b',status:'repeated_not_found',observations,url:'https://saved.test',syncGeneration:2}],[record('a'),record('b')])).toEqual([]);
   });
   it('rejects missing evidence versions and missing URLs', () => {
-    expect(confirmedRemovalRecords(['a'],[{bookmarkId:'a',status:'confirmed_dead',url:'https://saved.test'}],[{...record('a'),syncGeneration:undefined} as unknown as BookmarkRecord])).toEqual([]);
+    expect(confirmedRemovalRecords(['a'],[{bookmarkId:'a',status:'repeated_not_found',observations,url:'https://saved.test'}],[{...record('a'),syncGeneration:undefined} as unknown as BookmarkRecord])).toEqual([]);
+  });
+  it('rejects legacy, missing, HEAD-only and single-GET evidence', () => {
+    for (const check of [
+      {status:'confirmed_dead', observations},
+      {status:'repeated_not_found'},
+      {status:'repeated_not_found', observations:observations.slice(0,1)},
+      {status:'repeated_not_found', observations:observations.map(row => ({...row, method:'HEAD' as const}))},
+    ]) expect(confirmedRemovalRecords(['a'], [{bookmarkId:'a',url:'https://saved.test',syncGeneration:3,...check}], [record('a')])).toEqual([]);
   });
   it('distinguishes an empty library from an empty filter', () => {
     expect(healthEmptyText(0,'all')).toContain('添加书签');

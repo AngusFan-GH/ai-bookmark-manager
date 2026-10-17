@@ -21,6 +21,7 @@ import {
   type FetchClientDeps,
 } from './fetch-client';
 import { classify } from './classifier';
+import { detectContentSignal } from './content-signals';
 import { TaskScheduler, type SchedulerAttemptResult, type SchedulerInputItem } from './scheduler';
 import { DEFAULT_HEALTH_CONFIG } from './types';
 
@@ -97,7 +98,7 @@ export class HealthService {
         displayRows.push({ ...check, url: bookmark.url, status: 'outdated', checkedAt: check.checkedAt, evidence: ['书签 URL 或同步版本已变化；请重新检查'], syncGeneration: bookmark.syncGeneration });
         continue;
       }
-      displayRows.push(check);
+      displayRows.push(check.status === 'confirmed_dead' ? { ...check, status: 'repeated_not_found', observations: undefined, evidence: [...check.evidence, '旧版结果仅供参考；缺少逐次请求证据，请重新检查后人工复核'] } : check);
     }
     this.latestCache = byBookmark;
     return {
@@ -169,6 +170,7 @@ export class HealthService {
           status: 'unsupported',
           checkedAt: this.deps.now(),
           evidence: [dnsCheck.reason],
+          syncGeneration: b.syncGeneration,
         });
         skipped += 1;
         this.processed += 1;
@@ -228,10 +230,10 @@ export class HealthService {
           defaultMaxResponseBytes: deps.config.defaultMaxResponseBytes,
           defaultUserAgent: deps.config.defaultUserAgent,
         };
-        // HEAD is an inexpensive positive check only. Any non-2xx or network
-        // response is confirmed with a bounded GET before classification.
-        const { outcome, method } = await probeUrl(url, clientDeps, {
-          ...(deps.dns ? { dns: deps.dns } : {}), signal, allowPrivateHosts,
+        // Bounded GET adds tentative content evidence. Rate limits, opaque
+        // redirects, aborts and no-content responses stop at HEAD.
+        const { outcome, method, headHttpCode } = await probeUrl(url, clientDeps, {
+          ...(deps.dns ? { dns: deps.dns } : {}), signal, allowPrivateHosts, inspectContent: true, maxResponseBytes: Math.min(deps.config.defaultMaxResponseBytes, 65_536),
         });
         if (signal.aborted) {
           return { status: 'network_error', final: true, errorCode: 'abort', evidence: ['cancelled'] };
@@ -239,6 +241,7 @@ export class HealthService {
         if (outcome.redirectBlocked) {
           return {
             status: 'redirect_pending',
+            method,
             final: true,
             evidence: [`${method} detected a redirect`, '为避免扩展在未知目标发请求，未自动跟随；请在浏览器中打开后确认'],
           };
@@ -260,6 +263,7 @@ export class HealthService {
         }
 
         const cls = classify({
+          contentSignal: detectContentSignal(outcome.body, outcome.contentType),
           httpCode: outcome.httpCode,
           networkError: outcome.networkError,
           attempts: attempt,
@@ -268,11 +272,15 @@ export class HealthService {
         });
         const evidence: string[] = [];
         evidence.push(`检查方式：${method}`);
+        if (headHttpCode != null) evidence.push(`前置 HEAD：${headHttpCode || '无响应'}`);
+        evidence.push(cls.reason);
+        if (cls.status === 'healthy') evidence.push(method === 'HEAD' ? '仅验证 HTTP 响应；未读取页面内容' : outcome.body === undefined ? '未取得可分析的文本片段；仅记录 HTTP 状态' : '仅检查有限响应片段；不保证页面内容可用');
         if (outcome.networkError) evidence.push(`浏览器网络错误：${outcome.networkError}`);
         if (outcome.rawError) evidence.push(`raw: ${outcome.rawError}`);
         if (outcome.httpCode > 0) evidence.push(`${outcome.httpCode}`);
-        if (outcome.finalUrl && outcome.finalUrl !== url) evidence.push(`→ ${outcome.finalUrl}`);
+
         return {
+          method,
           status: cls.status,
           final: cls.status !== 'network_error' && cls.status !== 'suspected_dead',
           evidence,

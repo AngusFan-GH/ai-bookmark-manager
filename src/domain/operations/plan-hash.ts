@@ -21,6 +21,8 @@ export async function hashApprovedPlan(plan: OperationPlan): Promise<string> {
   const payload = JSON.stringify(normalize({
     id: plan.id,
     basedOnGeneration: plan.basedOnGeneration,
+    // Evidence changes alter which native writes are safe; runtime snapshot IDs do not.
+    organizationEvidence: plan.metadata['plan-service.evidence'] ?? null,
     steps: [...plan.steps]
       .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
       .map((step) => ({

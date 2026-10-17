@@ -25,14 +25,17 @@ src/domain/health/
 | `checking` | In flight | `TaskScheduler` is running a probe |
 | `unchecked` | Not scanned | No current result exists for this bookmark URL |
 | `outdated` | Old result | Bookmark URL or sync version changed after its last check |
-| `healthy` | 2xx | HEAD returned 2xx, or GET verification returned 2xx |
+| `healthy` | 2xx observed | Bounded GET returned 2xx without a detected warning; this is not proof of useful content |
 | `redirected` | 3xx followed | A platform adapter safely followed the redirect |
 | `redirect_pending` | Redirect needs review | Browser hid the manual redirect target, so it was not followed |
 | `auth_required` | 401 / 407 | Not dead; needs login |
 | `forbidden` | 403 | Not dead; site gates bots |
 | `rate_limited` | 429 | Server sent `Retry-After`; we honor it |
 | `suspected_dead` | 404 / 410 first hit | Needs retry window before promotion |
-| `confirmed_dead` | 404 / 410 after retry | Real dead |
+| `repeated_not_found` | Repeated GET 404 / 410 | Observed missing twice; requires manual review, not proof of permanent loss |
+| `confirmed_dead` | Legacy record only | Displayed as repeated not-found; requires fresh evidence before removal review |
+| `suspected_soft_404` | 2xx error-page signals | Tentative local content heuristic, not deletion evidence |
+| `suspected_login` | 2xx login-page signals | Tentative content restriction, not deletion evidence |
 | `network_error` | DNS / TCP / TLS / 5xx | Retryable; classifier treats 5xx the same as a network error |
 | `unsupported` | unsafe URL | Static guard rejected the URL |
 | `permission_required` | Extension lacks host permission | Not auto-resolvable; needs user grant |
@@ -44,16 +47,13 @@ src/domain/health/
 The state machine is intentionally conservative:
 
 - 401/407/403/429/5xx **never** become "dead" on the first hit.
-- A non-2xx HEAD response is confirmed with a bounded GET before classification.
-- 404/410 is `suspected_dead` on the first GET hit, `confirmed_dead` only
-  after a second GET check.
+- A bounded GET can verify HEAD results and inspect text evidence; 429, cancellation and hidden redirects do not trigger immediate fallback requests.
+- 404/410 is `suspected_dead` on the first GET hit and `repeated_not_found` after a second GET check. Short retry spacing does not establish permanent loss. Each observation retains its method, code and time.
 - 429 carries `retryAfterSec` so the scheduler can sleep that host.
 - Network errors have no httpCode at all; we record the stage
   (`dns` / `tcp` / `tls` / `abort` / `unknown`).
 
-The classifier never deletes bookmarks. The executor never
-deletes bookmarks. **No code path in Phase 3 can remove a
-bookmark**; the worst it does is mark a row `confirmed_dead`.
+The classifier never deletes bookmarks. The workspace may prepare a removal plan only after explicit manual review and selection, with current URL/sync evidence checks. Execution still requires an approved fixed preview and a successful backup. Suspected login/soft-404 and legacy records are not removal evidence.
 
 ## 4. URL guard
 
@@ -139,9 +139,9 @@ codes / headers / bodies. The matrix:
 | 401 | auth_required |
 | 403 | forbidden |
 | 404 (first hit) | suspected_dead |
-| 404 (after retry) | confirmed_dead |
+| 404 (after retry) | repeated_not_found |
 | 410 (first hit) | suspected_dead |
-| 410 (after retry) | confirmed_dead |
+| 410 (after retry) | repeated_not_found |
 | 429 (+Retry-After) | rate_limited; surfaces retryAfterSec |
 | 500 | network_error |
 | 502 | network_error |
@@ -189,3 +189,7 @@ RFC 5735 / RFC 6890.
   scan per click; in-memory queued work is not restored after a worker restart.
 - **Bulk recheck selection UI** — the `selectedIds` ref is reserved.
 - **Per-host export** — not requested by the dev guide.
+
+## 0.3 content-evidence boundary
+
+The browser adapter uses credentials `omit`, manual redirects, and at most 64 KiB of explicitly textual GET content. Raw body text is transient and is not stored or sent to AI by health classification. Soft-404/login signals are local heuristics and can miss JavaScript-rendered or localized pages. A healthy HTTP response is not a content-quality guarantee. Service-worker restarts do not transparently resume an in-memory scan; completed persisted observations remain available.

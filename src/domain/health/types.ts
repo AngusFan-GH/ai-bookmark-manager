@@ -22,7 +22,10 @@ export type LinkStatus =
   | 'forbidden'         // 403
   | 'rate_limited'       // 429
   | 'suspected_dead'    // first hit 404/410; not yet retried
-  | 'confirmed_dead'    // 404/410 across the retry window
+  | 'confirmed_dead'    // legacy only; migrated to review wording on read
+  | 'repeated_not_found' // repeated GET 404/410 observations, not proof of permanent death
+  | 'suspected_soft_404' // 2xx with a bounded error-page heuristic
+  | 'suspected_login'    // 2xx with a bounded login-page heuristic
   | 'network_error'     // DNS / TCP / TLS / abort / unknown
   | 'unsupported'       // non-http(s) / unresolvable host
   | 'permission_required'; // extension lacks host permission
@@ -30,7 +33,17 @@ export type LinkStatus =
 export type HealthCheckOutcome =
   | Exclude<LinkStatus, 'unchecked' | 'checking' | 'outdated' | 'permission_required'>;
 
+export interface HealthObservation {
+  checkedAt: number;
+  method?: 'HEAD' | 'GET';
+  httpCode?: number;
+  status: LinkStatus;
+  evidence: string[];
+}
+
 export interface LinkCheckRecord {
+  /** Bounded, body-free evidence for each probe in this scan. */
+  observations?: HealthObservation[];
   id: string;
   bookmarkId: string;
   status: LinkStatus;
@@ -66,6 +79,7 @@ export interface LinkCheckRecord {
  * can pass plain objects.
  */
 export interface HealthInputs {
+  contentSignal?: 'soft_404' | 'login';
   httpCode?: number;
   finalUrl?: string;
   /**

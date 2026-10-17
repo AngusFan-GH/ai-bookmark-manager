@@ -12,7 +12,7 @@ import { request } from '../../../src/client';
 import type { BookmarkRecord } from '../../../src/domain/bookmarks/types';
 import { safeBookmarkHref } from '../workspace-helpers';
 import { confirmedRemovalRecords, healthEmptyText } from './tools-helpers';
-import type { LinkStatus } from '../../../src/domain/health/types';
+import type { LinkStatus, HealthObservation } from '../../../src/domain/health/types';
 import type { HealthStatusSummary } from '../../../src/infrastructure/messaging/contracts';
 
 const store = useToolsBookmarkStore();
@@ -35,6 +35,7 @@ type HealthRow = {
   url?: string;
   checkedAt: number;
   evidence: string[];
+  observations?: HealthObservation[];
   syncGeneration?: number;
 };
 
@@ -42,6 +43,8 @@ const status = ref<HealthStatusSummary | null>(null);
 const rows = ref<HealthRow[]>([]);
 const filter = ref<'all' | LinkStatus>('all');
 const selectedIds = ref<string[]>([]);
+const reviewedManually = ref(false);
+watch(selectedIds, () => { reviewedManually.value = false; });
 const resultTable = ref<{clearSelection(): void}>();
 watch(filter, () => { selectedIds.value = []; resultTable.value?.clearSelection(); });
 const bookmarks = ref<BookmarkRecord[]>([]);
@@ -61,12 +64,12 @@ async function loadBookmarks() {
   bookmarks.value = all;
 }
 async function previewRemoval() {
-  if (loading.value || refreshing) return;
+  if (loading.value || refreshing || !reviewedManually.value) return;
   const selected = [...selectedIds.value];
   await refresh();
   if (error.value) return;
   const records = confirmedRemovalRecords(selected, rows.value, bookmarks.value);
-  if (!records.length) { ElMessage.warning('所选条目已变化，或尚未确认失效。请重新检查后再选择。'); return; }
+  if (!records.length) { ElMessage.warning('所选条目已变化，或缺少重复 404/410 证据。请重新检查后再选择。'); return; }
   emit('preview-delete', records);
 }
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -114,14 +117,17 @@ const statusLabels: Record<LinkStatus, string> = {
   unchecked: '未检测',
   checking: '检测中',
   outdated: '结果已过期',
-  healthy: '健康',
+  healthy: 'HTTP 可访问',
   redirected: '已重定向',
   redirect_pending: '跳转待确认',
   auth_required: '需登录',
   forbidden: '访问受限',
   rate_limited: '限流',
-  suspected_dead: '疑似失效',
-  confirmed_dead: '已确认失效',
+  suspected_dead: '单次 404/410',
+  confirmed_dead: '旧版结果待复核',
+  repeated_not_found: '重复 404/410',
+  suspected_soft_404: '疑似错误页面',
+  suspected_login: '疑似登录页面',
   network_error: '暂时不可验证',
   unsupported: '安全策略跳过',
   permission_required: '需要权限',
@@ -138,7 +144,10 @@ const statusColors: Record<LinkStatus, string> = {
   forbidden: 'warning',
   rate_limited: 'warning',
   suspected_dead: 'warning',
-  confirmed_dead: 'danger',
+  confirmed_dead: 'warning',
+  repeated_not_found: 'warning',
+  suspected_soft_404: 'warning',
+  suspected_login: 'warning',
   network_error: 'warning',
   unsupported: 'info',
   permission_required: 'info',
@@ -171,7 +180,10 @@ function statusDescription(row: HealthRow): string {
   if (row.status === 'network_error') return evidence || '暂时无法连接；不代表链接已经失效。';
   if (row.status === 'rate_limited') return evidence || '网站暂时限制请求，稍后可再次检查。';
   if (row.status === 'suspected_dead') return '首次返回 404 或 410，建议人工确认后再处理。';
-  if (row.status === 'confirmed_dead') return '多次检查后仍返回 404 或 410；不会自动删除书签。';
+  if (row.status === 'confirmed_dead') return '旧版结果缺少逐次证据，请重新检查后人工复核。';
+  if (row.status === 'repeated_not_found') return '短时间内重复返回 404/410，不证明永久失效。请打开原链接并人工复核证据。';
+  if (row.status === 'suspected_soft_404') return 'HTTP 成功，但有限页面片段的标题类似错误页面；仅为规则提示，需人工确认。';
+  if (row.status === 'suspected_login') return 'HTTP 成功，但检测到登录标题和密码框；可能需要登录，不是失效证据。';
   return evidence || '检查已完成。';
 }
 function formatCheckedAt(row: HealthRow): string {
@@ -327,14 +339,16 @@ onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer)
       <el-radio-group v-model="filter" size="small">
         <el-radio-button value="all">全部 ({{ counts.all ?? 0 }})</el-radio-button>
         <el-radio-button value="unchecked">未检测 ({{ counts.unchecked ?? 0 }})</el-radio-button>
-        <el-radio-button value="healthy">健康 ({{ counts.healthy ?? 0 }})</el-radio-button>
+        <el-radio-button value="healthy">HTTP 可访问 ({{ counts.healthy ?? 0 }})</el-radio-button>
         <el-radio-button value="redirected">重定向 ({{ counts.redirected ?? 0 }})</el-radio-button>
         <el-radio-button value="redirect_pending">跳转待确认 ({{ counts.redirect_pending ?? 0 }})</el-radio-button>
         <el-radio-button value="auth_required">需登录 ({{ counts.auth_required ?? 0 }})</el-radio-button>
         <el-radio-button value="forbidden">访问受限 ({{ counts.forbidden ?? 0 }})</el-radio-button>
         <el-radio-button value="rate_limited">限流 ({{ counts.rate_limited ?? 0 }})</el-radio-button>
-        <el-radio-button value="suspected_dead">疑似失效 ({{ counts.suspected_dead ?? 0 }})</el-radio-button>
-        <el-radio-button value="confirmed_dead">确认失效 ({{ counts.confirmed_dead ?? 0 }})</el-radio-button>
+        <el-radio-button value="suspected_dead">单次 404/410 ({{ counts.suspected_dead ?? 0 }})</el-radio-button>
+        <el-radio-button value="repeated_not_found">重复 404/410 ({{ counts.repeated_not_found ?? 0 }})</el-radio-button>
+        <el-radio-button value="suspected_soft_404">疑似错误页面 ({{ counts.suspected_soft_404 ?? 0 }})</el-radio-button>
+        <el-radio-button value="suspected_login">疑似登录页面 ({{ counts.suspected_login ?? 0 }})</el-radio-button>
         <el-radio-button value="network_error">暂不可验证 ({{ counts.network_error ?? 0 }})</el-radio-button>
         <el-radio-button value="unsupported">安全跳过 ({{ counts.unsupported ?? 0 }})</el-radio-button>
         <el-radio-button value="permission_required">需授权 ({{ counts.permission_required ?? 0 }})</el-radio-button>
@@ -342,9 +356,23 @@ onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer)
       </el-radio-group>
     </div>
 
-    <div class="selection-actions"><span>已选择 {{selectedIds.length}} 条</span><el-button :disabled="!selectedIds.length || loading || isRunning || isPaused || !hostPermissionGranted" @click="startScan([...selectedIds])">重新检查所选</el-button><el-button type="danger" plain :disabled="!removalRecords.length || loading || isRunning || isPaused" @click="previewRemoval">预览删除所选已确认失效书签（{{removalRecords.length}}）</el-button></div>
-    <p class="muted small">仅“已确认失效”的所选条目可以进入删除预览，仍会自动备份并要求逐项批准。疑似失效、需登录及网络错误不会被纳入删除。</p>
+    <div class="selection-actions"><span>已选择 {{selectedIds.length}} 条</span><el-button :disabled="!selectedIds.length || loading || isRunning || isPaused || !hostPermissionGranted" @click="startScan([...selectedIds])">重新检查所选</el-button><el-button type="danger" plain :disabled="!reviewedManually || !removalRecords.length || loading || isRunning || isPaused" @click="previewRemoval">预览删除所选重复 404/410 书签（{{removalRecords.length}}）</el-button></div>
+    <p class="muted small">仅具有本次逐次 GET 404/410 证据、地址及版本未变化的所选条目可以进入删除预览。先打开链接人工复核；预览后仍会自动备份并要求逐项批准。错误页、登录页及网络问题不纳入删除。</p>
+    <el-checkbox v-model="reviewedManually" :disabled="!removalRecords.length">我已打开并人工复核所选链接，理解短时间内重复 404/410 不代表永久失效</el-checkbox>
     <el-table ref="resultTable" :data="visible" row-key="bookmarkId" @selection-change="(items: HealthRow[]) => selectedIds = items.map(row => row.bookmarkId)" v-loading="loading" stripe max-height="500" :empty-text="healthEmptyText(rows.length, filter)">
+      <el-table-column type="expand">
+        <template #default="{ row }">
+          <div class="evidence-details">
+            <strong>本次扫描证据（本地规则检查，非 AI 判定）</strong>
+            <p v-if="!row.observations?.length">{{ row.evidence.join('；') }}。旧版记录可能缺少逐次请求证据，请重新检查。</p>
+            <ol v-else><li v-for="(observation, index) in row.observations" :key="index">
+              {{ new Date(observation.checkedAt).toLocaleString() }} · {{ observation.method || '未知方式' }} · HTTP {{ observation.httpCode || '无响应' }} · {{ statusLabels[observation.status as LinkStatus] }}
+              <div>{{ observation.evidence.join('；') }}</div>
+            </li></ol>
+            <p>不会保存页面正文。200 仅表示有限检查通过；页面需要登录、动态渲染或超出片段时可能无法判断。</p>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column type="selection" :reserve-selection="true" width="45" />
       <el-table-column label="状态" width="140">
         <template #default="{ row }">
@@ -393,12 +421,14 @@ onBeforeUnmount(() => { disposed = true; if (pollTimer) clearInterval(pollTimer)
 
     <p class="muted small notice">
       注意：链接检测是只读的；任何状态都不会触发删除。即便检测到"失效"或网络错误，
-      也只是标记，并等你人工决定。429 等限流状态会按服务器的 Retry-After 头自动避开。
+      也只是标记，并等你人工决定。429 的 Retry-After 会延后同站点队列；该条目需稍后重新检查。扫描队列仅在当前后台运行期间保留，浏览器或扩展重启后请重新开始，已保存的结果仍可查看。
     </p>
   </el-card>
 </template>
 
 <style scoped>
+.evidence-details { padding: 16px 24px; font-size: 13px; line-height: 1.7; }
+.evidence-details li { margin: 8px 0; }
 .selection-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:12px 0; }
 .muted { color: #8490a3; }
 .url-link {

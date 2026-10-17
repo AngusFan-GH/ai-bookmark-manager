@@ -13,12 +13,12 @@ vi.mock('element-plus', () => ({ ElMessage: {error:vi.fn(),info:vi.fn(),success:
 const passthrough = defineComponent({setup(_, {slots}) {return () => h('div', [slots.header?.(),slots.default?.(),slots.footer?.()]);}});
 let app: App | undefined; let host: HTMLDivElement;
 async function flush() { for (let i=0;i<8;i++) await nextTick(); await new Promise(resolve => setTimeout(resolve,0)); }
-function mount(component: typeof ImportFlow | typeof HealthView) {
-  host = document.createElement('div');document.body.append(host);app=createApp(component);
+function mount(component: typeof ImportFlow | typeof HealthView, props: Record<string, unknown> = {}) {
+  host = document.createElement('div');document.body.append(host);app=createApp(component, props);
   for (const name of ['ElCard','ElForm','ElFormItem','ElRadioGroup','ElRadioButton','ElTag','ElEmpty','ElResult','ElProgress']) app.component(name,passthrough);
   app.component('ElSwitch',defineComponent({props:['modelValue','disabled'],emits:['update:modelValue'],setup(props,{emit}){return()=>h('button',{role:'switch','aria-checked':!!props.modelValue,disabled:props.disabled,onClick:()=>emit('update:modelValue',!props.modelValue)},'切换内网扫描');}}));
   app.component('ElAlert',defineComponent({props:['title'],setup(props){return()=>h('p',props.title);}}));
-  app.component('ElTable',defineComponent({props:['data'],setup(props,{slots}){provide('rows',computed(()=>props.data));return()=>h('div',slots.default?.());}}));
+  app.component('ElTable',defineComponent({props:['data'],emits:['selection-change'],setup(props,{slots,emit,expose}){provide('rows',computed(()=>props.data));expose({clearSelection:()=>emit('selection-change',[])});return()=>h('div',[h('button',{onClick:()=>emit('selection-change',props.data)},'选择测试条目'),slots.default?.()]);}}));
   app.component('ElTableColumn',defineComponent({setup(_,{slots}){const rows=inject<ComputedRef<Array<Record<string,unknown>>>>('rows');return()=>h('div',(rows?.value??[]).map(row=>slots.default?.({row})));}}));
   app.component('ElButton',defineComponent({props:['disabled','loading'],setup(props,{slots}){return()=>h('button',{disabled:!!props.disabled||!!props.loading},slots.default?.());}}));
   app.component('ElDialog',defineComponent({props:['modelValue'],emits:['update:modelValue','closed'],setup(props,{slots,emit}){return()=>props.modelValue?h('section',[h('button', {onClick:()=>{emit('update:modelValue',false);emit('closed');}},'关闭弹窗'),slots.default?.(),slots.footer?.()]):null;}}));
@@ -80,6 +80,19 @@ describe('health result rendering',()=>{
     expect(toggle).not.toBeNull();expect(toggle.disabled).toBe(false);
     toggle.click();await flush();expect(mocks.setSetting).toHaveBeenCalledWith('allowPrivateHosts',true);
     await click('收起高级设置');expect(disclosure.getAttribute('aria-expanded')).toBe('false');
+  });
+  it('requires explicit selection and manual review before previewing repeated HTTP evidence',async()=>{
+    const row={bookmarkId:'web',url:'https://saved.test',status:'repeated_not_found',checkedAt:2000,evidence:['404'],syncGeneration:1,observations:[1000,2000].map(checkedAt=>({checkedAt,method:'GET',httpCode:404,status:'suspected_dead',evidence:['GET 404']}))};
+    mocks.request.mockResolvedValue({rows:[{id:'web',title:'Saved page',path:'Docs',url:'https://saved.test',kind:'bookmark',syncGeneration:1}],total:1});
+    mocks.healthList.mockResolvedValue({rows:[row]});
+    const preview=vi.fn();mount(HealthView,{'onPreview-delete':preview});await flush();
+    const button=()=>[...host.querySelectorAll('button')].find(b=>b.textContent?.startsWith('预览删除'))!;
+    expect(button().disabled).toBe(true);expect(preview).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('不证明永久失效');expect(host.textContent).toContain('GET 404');
+    await click('选择测试条目');expect(button().disabled).toBe(true);
+    const checkbox=[...host.querySelectorAll('label')].find(l=>l.textContent?.includes('我已打开并人工复核'))!.querySelector('input')!;
+    checkbox.click();await flush();expect(button().disabled).toBe(false);button().click();await flush();
+    expect(preview).toHaveBeenCalledTimes(1);expect(preview.mock.calls[0][0][0].id).toBe('web');
   });
   it('shows bookmark titles and keeps unsafe schemes as plain text',async()=>{
     mocks.request.mockResolvedValue({rows:[{id:'private-id',title:'Bookmarklet',path:'Tools',url:'javascript:alert(1)',kind:'bookmark',syncGeneration:1},{id:'web',title:'Saved page',path:'Docs',url:'https://saved.test',kind:'bookmark',syncGeneration:1}],total:2});

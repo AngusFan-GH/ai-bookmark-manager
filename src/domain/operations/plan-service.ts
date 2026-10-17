@@ -58,6 +58,11 @@ export interface PlanServiceDeps {
   now(): number;
 }
 
+export interface OrganizationEvidence {
+  bookmarks: Array<{bookmarkId:string; title:string; url?:string; path:string; parentId:string|null}>;
+  exactDuplicateGroups?: Array<{url:string; bookmarkIds:string[]}>;
+}
+
 export interface OrganizationStepInput {
   action: OperationAction;
   targetBrowserId?: string;
@@ -341,6 +346,10 @@ export class PlanService {
   }> {
     const plan = await this.deps.plansStore.get(planId);
     if (!plan) throw new AppErrorImpl('BOOKMARK_NOT_FOUND', `plan ${planId} not found`, false);
+    if (plan.metadata['plan-service.evidence']) {
+      const evidence = JSON.parse(plan.metadata['plan-service.evidence']) as OrganizationEvidence;
+      await this.assertOrganizationEvidence(evidence, plan.steps.map(step => ({...step,targetBrowserId:step.targetBrowserId ?? undefined,parentBrowserId:step.parentBrowserId ?? undefined})));
+    }
     return this.executor.execute(plan, { approvalToken, dryRun });
   }
 
@@ -348,10 +357,42 @@ export class PlanService {
     return this.deps.snapshotsStore.listByPlan(planId);
   }
 
-  async draftOrganization(input: { title?: string; steps: OrganizationStepInput[] }): Promise<OperationPlan> {
+  private async assertOrganizationEvidence(evidence:OrganizationEvidence, steps:OrganizationStepInput[]):Promise<void> {
+    const stale = () => { throw new AppErrorImpl('PLAN_STALE', '建议依据已变化，请重新检查书签后生成预览。', false); };
+    if (!evidence || !Array.isArray(evidence.bookmarks) || evidence.bookmarks.length > 1000) stale();
+    const byId = new Map(evidence.bookmarks.map(item => [item.bookmarkId,item]));
+    if (byId.size !== evidence.bookmarks.length) stale();
+    for (const step of steps) {
+      if (step.action === 'create') continue;
+      const expected = byId.get(step.targetBrowserId ?? '');
+      if (!expected) stale();
+      const current = await this.deps.bookmarksApi.get(step.targetBrowserId!);
+      if (current.title !== expected!.title || current.url !== expected!.url || current.parentId !== expected!.parentId) stale();
+    }
+    if (evidence.exactDuplicateGroups !== undefined) {
+      if (!Array.isArray(evidence.exactDuplicateGroups) || evidence.exactDuplicateGroups.length > 500) stale();
+      const deletes = new Set(steps.filter(step => step.action === 'delete').map(step => step.targetBrowserId));
+      const covered = new Set<string>();
+      for (const group of evidence.exactDuplicateGroups) {
+        if (!group || typeof group.url !== 'string' || !Array.isArray(group.bookmarkIds) || group.bookmarkIds.length < 2 || group.bookmarkIds.length > 1000 || new Set(group.bookmarkIds).size !== group.bookmarkIds.length) stale();
+        if (!group.bookmarkIds.some(id => deletes.has(id))) continue;
+        if (!group.bookmarkIds.some(id => !deletes.has(id))) stale();
+        for (const id of group.bookmarkIds) {
+          const expected = byId.get(id);
+          const current = await this.deps.bookmarksApi.get(id);
+          if (!expected || expected.url !== group.url || current.url !== group.url || current.title !== expected.title || current.parentId !== expected.parentId) stale();
+          covered.add(id);
+        }
+      }
+      for (const id of deletes) if (!id || !covered.has(id)) stale();
+    }
+  }
+
+  async draftOrganization(input: { title?: string; steps: OrganizationStepInput[]; evidence?: OrganizationEvidence }): Promise<OperationPlan> {
     if (!input || !Array.isArray(input.steps) || !input.steps.length || input.steps.length > 1000) {
       throw new AppErrorImpl('INVALID_REQUEST', 'provide between 1 and 1000 organization steps', false);
     }
+    if (input.evidence) await this.assertOrganizationEvidence(input.evidence, input.steps);
     const planId = this.deps.newId();
     const steps: OperationStep[] = [];
     const priorTargets = new Map<string, OperationStep>();
@@ -392,6 +433,10 @@ export class PlanService {
           const remaining = (subtree[0]?.children ?? []).filter(child => !steps.some(s => s.action === 'delete' && s.targetBrowserId === child.id));
           if (remaining.length) throw new AppErrorImpl('INVALID_REQUEST', 'folder must be empty; explicitly preview descendant deletions first', false);
         }
+        const source = input.evidence?.bookmarks.find(item => item.bookmarkId === node.id);
+        if (input.evidence && (!source || source.title !== node.title || source.url !== node.url || source.parentId !== node.parentId)) {
+          throw new AppErrorImpl('PLAN_STALE', '建议依据的书签已更改，请重新生成建议。', false);
+        }
         expectedBefore = expectedState(node);
         if (previousTargetStep) {
           expectedBefore = { ...previousTargetStep.expectedBefore };
@@ -419,7 +464,7 @@ export class PlanService {
       if (request.action !== 'create' && request.targetBrowserId) priorTargets.set(request.targetBrowserId, steps[steps.length - 1]);
     }
     const plan: OperationPlan = { id: planId, title: input.title || 'Organize bookmarks', description: 'Review native bookmark changes before approving.',
-      createdAt: this.deps.now(), approvedAt: null, basedOnGeneration: this.deps.currentSyncGeneration(), steps, status: 'draft', metadata: { 'plan-service.mode': 'organization' } };
+      createdAt: this.deps.now(), approvedAt: null, basedOnGeneration: this.deps.currentSyncGeneration(), steps, status: 'draft', metadata: { 'plan-service.mode': 'organization', ...(input.evidence ? {'plan-service.evidence':JSON.stringify(input.evidence)} : {}) } };
     validatePlan(plan);
     const snapshot: TreeSnapshot = {
       id: this.deps.newId(), planId, createdAt: this.deps.now(), syncGeneration: this.deps.currentSyncGeneration(),

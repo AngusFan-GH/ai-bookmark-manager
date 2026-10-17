@@ -1,6 +1,7 @@
 # Phase 3 交付报告
 
 > 日期：2026-10-13 | 阶段：3（链接检测引擎） | 状态：**部分完成；后续安全修订见 `docs/STATUS.md`**
+> 2026-10-17 修订：以下为历史阶段记录。当前 0.3 使用 `repeated_not_found` 表示重复观测到 404/410，不再称为永久失效；详见 `docs/link-health.md`。
 > 原则：所有命令与结果均来自真实执行；未验证项明确标注。
 
 ## 0. 阶段 3 任务清单与状态
@@ -28,7 +29,7 @@
 
 ### ADR-12：id-based classifier
 - 404/410 第一次 = `suspected_dead`
-- 404/410 第二次 = `confirmed_dead`
+- 404/410 第二次 = `repeated_not_found`（重复观测，仍需人工确认）
 - 401/403/429/5xx 永远不会被判 dead
 
 ### ADR-13：DNS resolver 抽象（修订）
@@ -148,9 +149,9 @@ Test Files  16 passed (16)
 | 429 + Retry-After | ✅ classifier → rate_limited；scheduler 暂停该 host |
 | 500 / 502 / 503 / 504 | ✅ classifier → network_error（不死）|
 | 404 (1st) | ✅ suspected_dead |
-| 404 (after retry) | ✅ confirmed_dead |
+| 404 (after retry) | ✅ repeated_not_found |
 | 410 (1st) | ✅ suspected_dead |
-| 410 (after retry) | ✅ confirmed_dead |
+| 410 (after retry) | ✅ repeated_not_found |
 | HEAD=405 → GET | ✅ fetch-client 切换 |
 | 超时 | ✅ 报 network_error / abort |
 | 重定向循环 | ✅ 生产请求不自动跟随重定向 |

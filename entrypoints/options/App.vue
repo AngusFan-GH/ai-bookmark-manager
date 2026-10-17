@@ -7,10 +7,22 @@ import type { BookmarkRecord } from '../../src/domain/bookmarks/types';
 import type { OperationPlan } from '../../src/domain/operations/types';
 import type { AssistantScope } from '../../src/domain/assistant/types';
 import BookmarkEditor from './components/BookmarkEditor.vue';
-import { buildFolderTree, safeBookmarkHref, initialSearch, downloadableJson, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel, hasPlanExecutionResult, folderDisplayPath, duplicateDeleteSteps, contentResultLabel, workspaceErrorLabel } from './workspace-helpers';
+import { buildFolderTree, safeBookmarkHref, initialSearch, downloadableJson, canExecuteReviewedPlan, selectedOrigins, organizationSteps, describePlanStep, planStatusLabel, stepStatusLabel, stepErrorLabel, hasPlanExecutionResult, folderDisplayPath, duplicateDeleteSteps, contentResultLabel, workspaceErrorLabel, readDismissedViews, persistDismissedViews, presentationKey, excludePlanStep } from './workspace-helpers';
 import LegacyTools from './LegacyTools.vue';
 type SessionView = workspace.AssistantSessionView;
 const store = useBookmarkStore();
+type TopicView={id:string;title:string;bookmarkIds:string[];reason:string;sourceMessageId:string;bookmarks:BookmarkRecord[]};
+const topicViews=ref<TopicView[]>([]);const selectedTopicId=ref('');
+const dismissedTopics=ref(readDismissedViews(localStorage,'bookmark-workspace.dismissed-topics'));
+const visibleTopics=computed(()=>topicViews.value.filter(topic=>!dismissedTopics.value.includes(topic.id)));
+const activeTopic=computed(()=>visibleTopics.value.find(topic=>topic.id===selectedTopicId.value));
+const browseRows=computed(()=>activeTopic.value?.bookmarks??store.rows);
+const browseTotal=computed(()=>activeTopic.value?.bookmarks.length??store.total);
+let topicGeneration=0;
+async function refreshTopics(){const generation=++topicGeneration;try{const views=await workspace.listTopicViews();if(generation===topicGeneration)topicViews.value=views;}catch{if(generation===topicGeneration)topicViews.value=[];/* Topic views never block native browsing. */}}
+watch(()=>store.stats.lastSync,()=>{topicViews.value=[];void refreshTopics();});
+function chooseTopic(topic:TopicView){if(locked.value)return;selectedTopicId.value=topic.id;selected.value=[];scopeSelection.value=topic.bookmarks.map(b=>({...b}));scopeChoice.value='selected';section.value='browse';}
+function dismissTopic(id:string){dismissedTopics.value=[...dismissedTopics.value,id];persistDismissedViews(localStorage,'bookmark-workspace.dismissed-topics',dismissedTopics.value);if(selectedTopicId.value===id)selectedTopicId.value='';}
 const query = ref(initialSearch(window.location.search)); const folderId = ref(''); const page = ref(1);
 const section = ref<'browse'|'organize'|'conversation'>('browse'); const directoryOpen = ref(false); const historyOpen=ref(false); const toolsOpen = ref(window.location.hash === '#health'); const settingsOpen = ref(false);
 const busy = ref(false); const sending = ref(false); const error = ref(''); const prompt = ref(initialSearch(window.location.search)); const scopeChoice=ref<'folder'|'all'|'selected'>('folder'); const scopeSelection=ref<BookmarkRecord[]>([]);
@@ -51,11 +63,19 @@ async function openExistingBookmark(browserId:string,edit:boolean){if(locked.val
 function isEditable(row:BookmarkRecord){return !!row.parentId && !store.folders.some(f=>f.id===row.parentId&&f.parentId===null);}
 async function prepareManual(input:workspace.OrganizationInput){if(locked.value)return;stopAutomatic();cancelBookmarkAdvice();busy.value=true;editorError.value='';try{plan.value=await workspace.prepareOrganization(input);editorOpen.value=false;section.value='organize';}catch(e){editorError.value=workspaceErrorLabel(e);}finally{busy.value=false;}}
 async function requestBookmarkAdvice(input:{title:string;url:string;parentFolderId?:string}){if(locked.value||!automaticReady.value)return;cancelBookmarkAdvice();const generation=adviceGeneration;const requestId=crypto.randomUUID();adviceRequestId=requestId;requestingAdvice.value=true;try{const result=await workspace.adviseBookmark(input,{automatic:true,requestId});if(generation===adviceGeneration&&editorOpen.value)bookmarkAdvice.value=result;}catch(e){if(generation===adviceGeneration)adviceError.value=workspaceErrorLabel(e);}finally{if(generation===adviceGeneration){requestingAdvice.value=false;adviceRequestId='';}}}
-function localSearch(){const scope={...prospectiveScope.value,...(prospectiveScope.value.bookmarkIds?{bookmarkIds:[...prospectiveScope.value.bookmarkIds]}:{})};query.value=prompt.value.trim();section.value='browse';void nextTick(()=>queueAutomatic('search',false,scope));}
+function localSearch(){if(locked.value)return;selectedTopicId.value='';stopAutomatic();query.value=prompt.value.trim();section.value='browse';void refresh();}
+// A submitted task is an explicit request. Background suggestion preferences do not
+// prevent it; missing consent always leaves a fully usable local result list.
+function submitTask(){
+  if(!prompt.value.trim()||locked.value||turnNeedsReview.value)return;
+  selectedTopicId.value='';query.value=prompt.value.trim();page.value=1;void refresh();
+  if(settings.value.hasKey&&settings.value.consent)void send();
+  else section.value='browse';
+}
 function clearSearch(){query.value='';prompt.value='';}
 async function startTask(text='',records:BookmarkRecord[]=[]){if(locked.value||!await confirmDraft())return;session.value=undefined;turnNotice.value='';turnNeedsReview.value=false;focusedMessage.value='';scopeSelection.value=records.filter(r=>r.kind==='bookmark').map(r=>({...r}));scopeChoice.value=scopeSelection.value.length?'selected':'folder';prompt.value=text;section.value='conversation';followMessages.value=true;}
-watch(selected,rows=>{if(scopeChoice.value==='selected')scopeSelection.value=rows.filter(b=>b.kind==='bookmark').map(b=>({...b}));});
-function chooseScope(value:'folder'|'all'|'selected'){scopeChoice.value=value;if(value==='selected')scopeSelection.value=selected.value.filter(b=>b.kind==='bookmark').map(b=>({...b}));}
+watch(selected,rows=>{if(scopeChoice.value==='selected'&&rows.length)scopeSelection.value=rows.filter(b=>b.kind==='bookmark').map(b=>({...b}));});
+function chooseScope(value:'folder'|'all'|'selected'){scopeChoice.value=value;if(value==='selected'&&selected.value.some(b=>b.kind==='bookmark'))scopeSelection.value=selected.value.filter(b=>b.kind==='bookmark').map(b=>({...b}));}
 function showSuggestions(messageId:string){focusedMessage.value=messageId;section.value='organize';}
 const suggestedMoves=ref<Array<{bookmarkId:string;targetFolderId:string;reason:string}>>([]);
 const suggestedFolders=ref<Array<{proposalId:string;title:string;parentFolderId:string}>>([]);
@@ -76,6 +96,21 @@ const toolsTab=ref<'bookmarks'|'health'>(window.location.hash==='#health'?'healt
 function openTools(tab:'bookmarks'|'health'='bookmarks'){toolsTab.value=tab;toolsOpen.value=true;}
 async function prepareHealthDelete(rows:BookmarkRecord[]){if(busy.value||sending.value)return;await run(async()=>{plan.value=await workspace.prepareOrganization({title:'移除选中的失效书签',steps:rows.filter(b=>b.kind==='bookmark').map(b=>({action:'delete' as const,targetBrowserId:b.browserId,reason:'用户从链接健康报告明确选择'}))});section.value='organize';toolsOpen.value=false;});}
 const focusedMessage = ref('');
+const previousTurnsOpen=ref(false);
+const latestAssistant=computed(()=>session.value?.messages.filter(message=>message.role==='assistant').at(-1));
+const visibleMessages=computed(()=>{
+  const messages=session.value?.messages??[];
+  if(previousTurnsOpen.value)return messages;
+  const lastUser=messages.map(message=>message.role).lastIndexOf('user');
+  return lastUser<0?messages.slice(-1):messages.slice(lastUser);
+});
+const previousTurnCount=computed(()=>Math.max(0,(session.value?.messages.filter(message=>message.role==='assistant').length??0)-1));
+const currentReferences=computed(()=>latestAssistant.value?.references??[]);
+watch(()=>session.value?.id,()=>{previousTurnsOpen.value=false;});
+const planSummary=computed(()=>{
+  const steps=plan.value?.steps??[];
+  return [['移动',steps.filter(s=>s.action==='move').length],['新建',steps.filter(s=>s.action==='create').length],['修改',steps.filter(s=>s.action==='update'||s.action==='rename').length],['删除',steps.filter(s=>s.action==='delete').length]].filter(([,count])=>count).map(([label,count])=>`${label} ${count}`).join(' · ');
+});
 const focusedAssistant = computed(() => session.value?.messages.find(m=>m.id===focusedMessage.value) ?? [...(session.value?.messages ?? [])].reverse().find(m=>m.role==='assistant'));
 const moves = computed(() => suggestedMoves.value);
 const selectedMoves = ref<string[]>([]);
@@ -93,11 +128,11 @@ const canApply = computed(() => canExecuteReviewedPlan({status:plan.value?.statu
 let timer: ReturnType<typeof setTimeout> | undefined;
 async function run(action:()=>Promise<void>) { if(busy.value||sending.value||contentPending.value)return;error.value=''; busy.value=true; try { await action(); } catch(e) {error.value=workspaceErrorLabel(e);} finally {busy.value=false;} }
 let refreshQueue=Promise.resolve();let refreshVersion=0;
-async function refresh() {const version=++refreshVersion;const args=[query.value,folderId.value||undefined,(page.value-1)*200] as const;refreshQueue=refreshQueue.catch(()=>{}).then(async()=>{if(version===refreshVersion)await store.load(...args);});await refreshQueue;}
+async function refresh() {const version=++refreshVersion;const args=[query.value,folderId.value||undefined,(page.value-1)*200] as const;refreshQueue=refreshQueue.catch(()=>{}).then(async()=>{if(version===refreshVersion)await store.load(...args);});await refreshQueue;if(version===refreshVersion)void refreshTopics();}
 watch([query,folderId],()=>{page.value=1; selected.value=[]; if(timer)clearTimeout(timer); timer=setTimeout(()=>void refresh(),200);});
 watch(page,()=>void refresh());
 watch(plan,()=>{backedUp.value=false;reviewed.value=false;deleteConfirmation.value='';},{deep:true});
-function pickFolder(node:{id:string}) {folderId.value=node.id;section.value='browse';directoryOpen.value=false;}
+function pickFolder(node:{id:string}) {selectedTopicId.value='';folderId.value=node.id;section.value='browse';directoryOpen.value=false;}
 async function copy(url:string) { try {await navigator.clipboard.writeText(url);ElMessage.success('原始 URL 已复制');}catch{ElMessage.error('无法复制，请从详情中选择原始 URL');} }
 function download(data:unknown,name:string) {const url=URL.createObjectURL(downloadableJson(data));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}
 async function confirmDraft(){if(!prompt.value.trim())return true;try{await ElMessageBox.confirm('当前消息尚未发送。继续会清空草稿，并切换到新的对话。','切换对话',{confirmButtonText:'清空草稿并继续',cancelButtonText:'保留草稿'});return true;}catch{return false;}}
@@ -116,7 +151,7 @@ async function send() {
     const result=await workspace.sendTurn(id,text,{expectedRevision:session.value.revision,signal:controller.signal,onText:partial=>{if(acceptingText&&generation===turnGeneration&&!controller.signal.aborted){streamingText.value=partial;}}});
     if(generation!==turnGeneration)return;
     if(controller.signal.aborted)turnNotice.value='回答已在停止前完成，已保留完整结果。';
-    acceptingText=false;session.value=result;streamingText.value='';pendingQuestion.value='';prompt.value='';focusedMessage.value='';sessions.value=await workspace.listSessions();
+    acceptingText=false;session.value=result;streamingText.value='';pendingQuestion.value='';prompt.value='';focusedMessage.value='';sessions.value=await workspace.listSessions();void refreshTopics();
   } catch(e){if(generation===turnGeneration){const message=e instanceof Error?e.message:String(e);turnNotice.value='';if(controller.signal.aborted&&/^(Request cancel(?:ed|led)\.?|请求已停止|canceled|cancelled)$/i.test(message))turnNotice.value='已停止生成，问题已保留，可以修改后重试。';else{turnNeedsReview.value=message==='无法确认本次回答是否已保存，请重新打开对话核对后再发送。';error.value=workspaceErrorLabel(e);}}}
   finally{acceptingText=false;if(generation===turnGeneration){streamingText.value='';pendingQuestion.value='';sending.value=false;canceling.value=false;turnController=undefined;}}
 }
@@ -135,7 +170,7 @@ async function saveSettings(testConnection=false) {
     const privacyChanged=JSON.stringify([...draft.excludedFolderIds].sort())!==JSON.stringify([...(settings.value.excludedFolderIds??[])].sort());
     await workspace.saveAssistantSettings({...draft,keyStorage:rememberKey.value?'local':'session',...(apiKey.value.trim()?{apiKey:apiKey.value.trim()}:{})});
     saved=true;phase='loading';apiKey.value='';settings.value=await workspace.getAssistantSettings();
-    if(privacyChanged){session.value=undefined;turnNeedsReview.value=false;turnNotice.value='';focusedMessage.value='';}
+    if(privacyChanged){topicViews.value=[];selectedTopicId.value='';void refreshTopics();session.value=undefined;turnNeedsReview.value=false;turnNotice.value='';focusedMessage.value='';}
     if(testConnection){phase='testing';settings.value=await workspace.testAssistantConnection();settingsNotice.value='连接测试通过。现在可以收藏、搜索或进入整理，AI 会按你的设置自动提供建议。';}
     if(onboarding.value||testConnection){phase='finishing';await workspace.completeOnboarding();settings.value={...settings.value,onboardingCompleted:true};onboarding.value=false;}
     settingsOpen.value=false;ElMessage.success(testConnection?'连接测试通过，设置已保存':'AI 设置已保存');
@@ -146,13 +181,17 @@ async function skipOnboarding(){if(busy.value)return;busy.value=true;try{await w
 async function clearKey(){if(busy.value||sending.value)return;stopAutomatic();cancelBookmarkAdvice();busy.value=true;settingsError.value='';try{await workspace.clearAssistantKey();apiKey.value='';settings.value=await workspace.getAssistantSettings();}catch(e){settingsError.value=workspaceErrorLabel(e);}finally{busy.value=false;}}
 async function checkDuplicates(){const scope=folderId.value;await run(async()=>{invalidateDuplicates();const result=await workspace.analyzeDuplicates(scope||undefined);if(scope!==folderId.value)return;duplicates.value=result.groups;duplicatesChecked.value=true;duplicateScope.value=currentFolder.value;});}
 function duplicateDisabled(group:{bookmarks:BookmarkRecord[]},id:string){return !duplicateSelection.value.includes(id)&&group.bookmarks.filter(b=>!duplicateSelection.value.includes(b.id)).length<=1;}
-async function prepareDuplicates(){await run(async()=>{plan.value=await workspace.prepareOrganization({title:'移除选中的重复书签',steps:duplicateDeleteSteps(duplicates.value,duplicateSelection.value)});});}
+async function prepareDuplicates(){await run(async()=>{plan.value=await workspace.prepareOrganization({title:'移除选中的重复书签',steps:duplicateDeleteSteps(duplicates.value,duplicateSelection.value),evidence:{bookmarks:duplicates.value.flatMap(group=>group.bookmarks.map(b=>({bookmarkId:b.id,title:b.title,url:b.url,path:b.path,parentId:b.parentId}))),exactDuplicateGroups:duplicates.value.map(group=>({url:group.url,bookmarkIds:group.bookmarks.map(b=>b.id)}))}});});}
 async function prepareMoves() {await run(async()=>{const steps=organizationSteps(moves.value,suggestedFolders.value,selectedMoves.value);
 for(const edit of suggestedEdits.value.filter(item=>selectedEdits.value.includes(item.bookmarkId)))steps.push({action:'update',targetBrowserId:edit.bookmarkId,desiredAfter:{title:edit.title},reason:edit.reason});
-for(const deletion of suggestedDeletions.value.filter(item=>selectedDeletions.value.includes(item.bookmarkId)))steps.push({action:'delete',targetBrowserId:deletion.bookmarkId,reason:deletion.reason});plan.value=await workspace.prepareOrganization({title:'AI 目录整理建议',steps});section.value='organize';});}
+for(const deletion of suggestedDeletions.value.filter(item=>selectedDeletions.value.includes(item.bookmarkId)))steps.push({action:'delete',targetBrowserId:deletion.bookmarkId,reason:deletion.reason});plan.value=await workspace.prepareOrganization({title:'AI 目录整理建议',steps,evidence:{bookmarks:focusedAssistant.value?.suggestionEvidence??[]}});section.value='organize';});}
 async function prepareDelete(records:BookmarkRecord[]=selected.value) {if(!records.length)return;const targets=records.filter(isEditable).map(b=>({...b}));if(!targets.length)return;await run(async()=>{plan.value=await workspace.prepareOrganization({title:'删除选中的书签或目录',steps:targets.map(b=>({action:'delete' as const,targetBrowserId:b.browserId,reason:'用户在工作台明确选择'}))});section.value='organize';});}
+async function excludeStep(id:string){
+  if(!plan.value||applied.value||!['draft','validated'].includes(plan.value.status)||plan.value.metadata['plan-service.mode']!=='organization')return;
+  await run(async()=>{const current=plan.value!;const steps=excludePlanStep(current.steps,id);if(!steps.length){plan.value=undefined;return;}const evidence=current.metadata['plan-service.evidence'];plan.value=await workspace.prepareOrganization({title:current.title,steps,...(evidence?{evidence:JSON.parse(evidence)}:{})});});
+}
 async function backupPlan() {await run(async()=>{if(!plan.value)return;const data=await workspace.exportPlanBackup(plan.value.id);download(data,`bookmark-plan-${plan.value.id}.json`);backedUp.value=true;});}
-async function applyPlan() {if(!canApply.value||!plan.value)return;await run(async()=>{const id=plan.value!.id;reviewed.value=false;const approval=await store.approve(id);const result=await store.execute(id,approval.token);executedPlanIds.value.add(id);if(result.syncWarning)error.value=result.syncWarning;reviewed.value=false;await refresh();plan.value=await store.getPlan(id);ElMessage.info(`执行结果：${planStatusLabel(result.status)}。${result.succeeded} 项成功，${result.failed} 项失败，${result.compensated} 项已补偿。请在历史中查看各步骤。`);});}
+async function applyPlan() {if(!canApply.value||!plan.value)return;await run(async()=>{const id=plan.value!.id;reviewed.value=false;const approval=await store.approve(id);const result=await store.execute(id,approval.token);executedPlanIds.value.add(id);topicViews.value=[];await refreshTopics();if(result.syncWarning)error.value=result.syncWarning;reviewed.value=false;await refresh();plan.value=await store.getPlan(id);ElMessage.info(`执行结果：${planStatusLabel(result.status)}。${result.succeeded} 项成功，${result.failed} 项失败，${result.compensated} 项已补偿。请在历史中查看各步骤。`);});}
 async function openHistory() {historyOpen.value=true;await run(async()=>{history.value=(await workspace.listHistory()).map(item=>({...item,id:item.planId}));});}
 async function viewHistory(id:string){await run(async()=>{plan.value=await store.getPlan(id);section.value='organize';historyOpen.value=false;});}
 async function prepareRestore(id:string){await run(async()=>{plan.value=await workspace.prepareRecovery(id);section.value='organize';historyOpen.value=false;});}
@@ -173,12 +212,14 @@ async function extractContent() {
 }
 async function inspectContent(){const targets=selected.value.filter(b=>b.kind==='bookmark').map(b=>({...b}));if(!targets.length||locked.value)return;if(targets.length>50){error.value='每次最多查看 50 个书签的内容状态。';return;}await run(async()=>{const result=await workspace.getContentStatus(targets.map(b=>b.id));contentResults.value=targets.map(b=>{const r=result.results.find(item=>item.bookmarkId===b.id);return{id:b.id,title:b.title||'未命名书签',url:b.url||'',path:b.path||'根目录',label:r?contentResultLabel(r.status,r.reason):'尚未读取内容'};});});}
 async function clearExtractedContent(){const targets=contentResults.value.map(r=>({...r}));if(!targets.length||locked.value)return;await run(async()=>{await workspace.clearContent(targets.map(r=>r.id));contentResults.value=targets.map(r=>({...r,label:'已清除提取文本；已发送的历史对话不会因此删除'}));});}
-function visibility(){if(!document.hidden)void refresh();}
+function visibility(){if(!document.hidden){void refresh();void refreshTopics();}}
 function hashChange(){if(window.location.hash==='#health')openTools('health');if(window.location.hash==='#settings')settingsOpen.value=true;}
 watch(toolsOpen,open=>{if(!open)void refresh();});
 function persistLocation(){const url=new URL(window.location.href);if(query.value)url.searchParams.set('q',query.value);else url.searchParams.delete('q');if(session.value)url.searchParams.set('session',session.value.id);else url.searchParams.delete('session');window.history.replaceState(null,'',url.pathname+url.search+url.hash);}
 watch([query,()=>session.value?.id],persistLocation);
 watch(editorOpen,open=>{if(!open){const url=new URL(window.location.href);url.searchParams.delete('capture');window.history.replaceState(null,'',url.pathname+url.search+url.hash);initialBookmark.value=undefined;bookmarkAdvice.value=undefined;editorError.value='';}});
+const dismissedAdvice=ref(readDismissedViews(localStorage,'bookmark-workspace.dismissed-advice'));let currentAdviceKey='';
+function dismissAutomatic(){if(currentAdviceKey){dismissedAdvice.value=[...dismissedAdvice.value,currentAdviceKey];persistDismissedViews(localStorage,'bookmark-workspace.dismissed-advice',dismissedAdvice.value);}stopAutomatic();}
 const automaticSession=ref<SessionView>();const automaticBusy=ref(false);const automaticError=ref('');const automaticLabel=ref('');const automaticScopeDescription=ref('');
 let lastAutomaticRequest:{kind:'search'|'organize';scope:AssistantScope}|undefined;
 let automaticTimer:ReturnType<typeof setTimeout>|undefined;let automaticGeneration=0;let automaticSessionId='';let automaticCount=0;const attemptedContexts=new Set<string>();
@@ -187,7 +228,7 @@ function queueAutomatic(kind:'search'|'organize',retry=false,requestedScope:Assi
   stopAutomatic();if(!automaticReady.value||settingsOpen.value||editorOpen.value||toolsOpen.value)return;
   if(kind==='search'&&!query.value.trim())return;
   lastAutomaticRequest={kind,scope:{...requestedScope,...(requestedScope.bookmarkIds?{bookmarkIds:[...requestedScope.bookmarkIds]}:{})}};
-  if(automaticCount>=6){automaticError.value='本次工作台已达到 6 次自动建议上限；仍可使用“询问 AI”继续。';return;}
+  if(automaticCount>=6){automaticError.value='本次工作台已达到 6 次自动建议上限；仍可在上方提交任务继续。';return;}
   const generation=automaticGeneration;automaticLabel.value=kind==='search'?'搜索建议':'整理建议';
   automaticTimer=setTimeout(async()=>{
     if(generation!==automaticGeneration||!automaticReady.value||locked.value)return;
@@ -200,6 +241,7 @@ function queueAutomatic(kind:'search'|'organize',retry=false,requestedScope:Assi
     if(scope.bookmarkIds!==undefined&&(!scope.bookmarkIds.length||scope.bookmarkIds.length>60)){automaticError.value='搜索的明确选择范围需为 1–60 个书签。请重新选择范围后搜索；没有发送任何书签。';return;}
     automaticScopeDescription.value=kind==='organize'?`${selected.value.length?'所选':'当前页'} ${chosen.length} / ${available.length} 个书签${available.length>20?'（仅前 20 个，其余未发送）':''}`:scopeLabel(scope);
     const context=JSON.stringify([kind,query.value,scope,page.value,automaticDataFingerprint.value,settings.value]);
+    currentAdviceKey=presentationKey(JSON.stringify([kind,query.value,scope,available.map(b=>[b.id,b.title,b.url,b.path,b.parentId]),store.folders.map(f=>[f.id,f.title,f.path,f.parentId]),settings.value.excludedFolderIds]));if(dismissedAdvice.value.includes(currentAdviceKey))return;
     if(!retry&&attemptedContexts.has(context))return;
     const text=kind==='search'?`根据搜索“${query.value.trim().slice(0,500)}”，推荐最相关的收藏并简要说明用途。仅推荐，不提出更改。`:'为这批书签提供简短的标题和目录整理建议。不要删除，不要执行任何更改。';
     automaticBusy.value=true;attemptedContexts.add(context);automaticCount++;
@@ -228,6 +270,7 @@ onMounted(async()=>{
     if(editId||viewId){await navigateExistingBookmark((editId||viewId)!,!!editId);const url=new URL(window.location.href);url.searchParams.delete('edit');url.searchParams.delete('view');window.history.replaceState(null,'',url.pathname+url.search+url.hash);}
     if(sessionId){session.value=await workspace.getSession(sessionId);prompt.value='';section.value='conversation';}
   });
+  void refreshTopics();
   document.addEventListener('visibilitychange',visibility);window.addEventListener('hashchange',hashChange);
 });
 onUnmounted(()=>{++turnGeneration;turnController?.abort();stopAutomatic();cancelBookmarkAdvice();if(timer)clearTimeout(timer);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('hashchange',hashChange);});
@@ -252,19 +295,20 @@ onUnmounted(()=>{++turnGeneration;turnController?.abort();stopAutomatic();cancel
   <main class="main-pane">
     <section class="goal-panel" aria-label="书签任务入口">
       <div class="hero-heading"><div><h1>今天，想用收藏做什么？</h1></div><span class="local-badge">本地原生书签 · {{store.stats.bookmarks}} 个</span></div>
-      <form class="goal-form" @submit.prevent="section==='conversation'?send():localSearch()">
+      <form class="goal-form" @submit.prevent="submitTask">
         <label class="sr-only" for="workspace-goal">搜索书签或描述你的目标</label>
-        <el-input id="workspace-goal" v-model="prompt" type="textarea" :rows="2" maxlength="8000" resize="none" aria-label="搜索书签或描述你的目标" placeholder="搜索标题、网址，或问：用我的收藏，帮我规划 Vue 入门学习…" :disabled="sending" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send"/>
-        <div class="goal-actions"><small>{{automaticReady?'搜索后自动补充 AI 建议 · 可在设置中关闭':'本地搜索不会发送数据 · Ctrl / ⌘ + Enter 询问 AI'}}</small><div><el-button :type="section==='conversation'?'default':'primary'" :disabled="locked" @click="localSearch">本地搜索</el-button><el-button v-if="sending" :loading="canceling" @click="cancel">取消生成</el-button><el-button v-else :type="section==='conversation'?'primary':'default'" :disabled="!prompt.trim()||locked||turnNeedsReview" @click="send">{{session?'继续对话':'询问 AI'}}</el-button></div></div>
+        <el-input id="workspace-goal" v-model="prompt" type="textarea" :rows="2" maxlength="8000" resize="none" aria-label="搜索书签或描述你的目标" placeholder="搜索标题、网址，或问：用我的收藏，帮我规划 Vue 入门学习…" :disabled="sending" @keydown.ctrl.enter.prevent="submitTask" @keydown.meta.enter.prevent="submitTask"/>
+        <div class="goal-actions"><small>{{settings.hasKey&&settings.consent?'先显示本地匹配，再由 AI 补充 · 更改需审核':'本地搜索可直接使用 · 配置 AI 后可理解完整任务'}}</small><div><el-button text :disabled="locked" @click="localSearch">仅本地搜索</el-button><el-button v-if="sending" :loading="canceling" @click="cancel">取消生成</el-button><el-button v-else type="primary" :disabled="!prompt.trim()||locked||turnNeedsReview" @click="submitTask">{{session?'继续任务':'开始任务'}}</el-button></div></div>
       </form>
       <div class="task-context">
-        <span>AI 范围：</span><el-select :model-value="scopeChoice" aria-label="新任务的书签范围" :disabled="locked" @change="chooseScope"><el-option :label="`当前目录：${currentFolder}`" value="folder"/><el-option label="全部书签" value="all"/><el-option :label="`所选书签（${selected.filter(b=>b.kind==='bookmark').length}）`" value="selected" :disabled="!selected.some(b=>b.kind==='bookmark')"/></el-select>
+        <span>任务范围：</span><el-select :model-value="scopeChoice" aria-label="新任务的书签范围" :disabled="locked" @change="chooseScope"><el-option :label="`当前目录：${currentFolder}`" value="folder"/><el-option label="全部书签" value="all"/><el-option :label="`所选书签（${scopeChoice==='selected'?scopeSelection.length:selected.filter(b=>b.kind==='bookmark').length}）`" value="selected" :disabled="!scopeSelection.length&&!selected.some(b=>b.kind==='bookmark')"/></el-select>
         <span class="muted">{{scopeLabel(prospectiveScope)}}{{scopeChoice==='selected'?'':' · 包含子目录'}}，搜索关键词不限制 AI 范围</span><details v-if="scopeChoice==='selected'&&scopeSelection.length" class="scope-selection"><summary>查看所选范围</summary><p v-for="item in scopeSelection" :key="item.id">{{item.title||'未命名书签'}} · {{item.path||'根目录'}}</p></details>
         <el-button v-if="session" text :disabled="locked" @click="newSession">新任务</el-button>
       </div>
       <div v-if="scopeDiffers" class="scope-warning" role="status">当前对话仍使用“{{scopeName}}”。要使用新的范围，请点“新任务”；继续对话不会偷偷切换范围。</div>
       <p v-if="!settings.hasKey||!settings.consent" class="setup-notice">AI 尚未配置或会话密钥已失效。<button class="text-button" :disabled="locked" @click="settingsOpen=true">配置 MiniMax</button> · 浏览、收藏和手动管理可直接使用。</p>
-      <p v-if="settings.hasKey&&settings.consent&&!automaticReady" class="setup-notice">{{settings.autoSuggestions?'当前连接尚未测试，自动建议暂未启动。':'自动建议尚未开启。'}}<button class="text-button" @click="settingsOpen=true">{{settings.autoSuggestions?'测试连接':'开启自动建议'}}</button> · 仍可手动询问 AI。</p>
+      <p v-if="settings.hasKey&&settings.consent&&!automaticReady" class="setup-notice">{{settings.autoSuggestions?'当前连接尚未测试，自动建议暂未启动。':'自动建议尚未开启。'}}<button class="text-button" @click="settingsOpen=true">{{settings.autoSuggestions?'测试连接':'开启自动建议'}}</button> · 提交任务仍会使用 AI。</p>
+      <div v-if="sessions.length&&!session" class="recent-tasks" aria-label="最近任务"><span>最近</span><button v-for="item in sessions.slice(0,3)" :key="item.id" :disabled="locked" @click="switchSession(item.id)">{{item.title||'未命名任务'}}</button></div>
       <nav class="quick-actions" aria-label="常用任务">
         <button :disabled="locked" @click="openEditor('bookmark')"><span>＋</span> 收藏网址</button>
         <button :class="{active:section==='browse'}" @click="section='browse'"><span>▦</span> 浏览书签</button>
@@ -278,25 +322,28 @@ onUnmounted(()=>{++turnGeneration;turnController?.abort();stopAutomatic();cancel
     <aside v-if="(automaticBusy||automaticMessage||automaticError)&&section!=='conversation'" class="automatic-card" aria-label="自动 AI 建议" aria-live="polite">
       <strong>✦ {{automaticLabel||'自动 AI 建议'}}</strong><p v-if="automaticScopeDescription" class="muted">本次范围：{{automaticScopeDescription}}</p><p v-if="automaticBusy">正在自动生成建议…你可以继续浏览，或取消本次生成。</p><p v-if="automaticMessage">{{automaticMessage.text}}</p><p v-if="automaticError" class="muted">{{automaticError}} 不会自动重试；本地功能仍可使用。</p>
       <p class="muted">仅发送当前任务的查询、候选标题、网址和目录；不会读取网页正文。整理每次最多 20 个，搜索最多 60 个。实际更改仍需预览并确认。</p>
-      <el-button v-if="automaticBusy" @click="stopAutomatic()">取消本次建议</el-button><el-button v-if="automaticMessage" @click="reviewAutomatic">查看建议详情</el-button><el-button v-if="automaticError" @click="retryAutomatic">重试本次建议</el-button>
+      <el-button v-if="automaticBusy" @click="stopAutomatic()">取消本次建议</el-button><el-button v-if="automaticMessage" @click="reviewAutomatic">查看建议详情</el-button><el-button v-if="automaticError" @click="retryAutomatic">重试本次建议</el-button><el-button text @click="dismissAutomatic">忽略建议</el-button>
     </aside>
+    <nav v-if="visibleTopics.length" class="topic-views" aria-label="虚拟主题视图"><span>主题视图 <small>不改变原生目录</small></span><div v-for="topic in visibleTopics" :key="topic.id"><button :class="{active:activeTopic?.id===topic.id}" :disabled="locked" :title="topic.reason" @click="chooseTopic(topic)">{{topic.title}} · {{topic.bookmarks.length}}</button><button class="dismiss-topic" :aria-label="`隐藏主题 ${topic.title}`" @click="dismissTopic(topic.id)">×</button></div></nav>
     <section v-if="section==='browse'" class="results-panel" aria-label="浏览书签">
-      <div class="section-heading"><div><h2>{{currentFolder}}</h2><p class="muted">{{query?`搜索“${query}” · `:''}}{{store.total}} 条记录{{folderId?' · 包含当前目录和全部子目录':''}}</p></div><div class="button-row"><el-button @click="directoryOpen=true">选择目录</el-button><el-button :disabled="locked" @click="openEditor('folder')">新建目录</el-button><el-button v-if="query" text @click="clearSearch">清除搜索</el-button></div></div>
+      <div class="section-heading"><div><h2>{{activeTopic?activeTopic.title:currentFolder}}</h2><p v-if="activeTopic" class="muted">虚拟主题 · {{activeTopic.bookmarks.length}} 个书签 · {{activeTopic.reason}} · 原生目录保持不变 <button class="text-button" @click="selectedTopicId=''">返回全部结果</button></p><p v-else class="muted">{{query?`搜索“${query}” · `:''}}{{store.total}} 条记录{{folderId?' · 包含当前目录和全部子目录':''}}</p></div><div class="button-row"><el-button @click="directoryOpen=true">选择目录</el-button><el-button :disabled="locked" @click="openEditor('folder')">新建目录</el-button><el-button v-if="query" text @click="clearSearch">清除搜索</el-button></div></div>
       <div v-if="selected.length" class="selection-toolbar" role="region" aria-label="所选项目操作"><strong>已选 {{selected.length}} 项</strong><span v-if="selected.some(b=>b.kind==='folder')" class="muted">删除目录将包含其子目录和书签，预览会逐项列出。</span><el-button :disabled="locked" @click="openEditor('move',selected)">移动所选</el-button><el-button :disabled="locked" @click="prepareDelete()">预览删除</el-button><el-button :disabled="locked||!selected.some(b=>b.kind==='bookmark')" @click="startTask('帮我整理所选书签，提出标题和目录建议，并说明每项理由。',selected)">AI 整理所选</el-button><details class="content-tools"><summary>页面内容（可选）</summary><p class="muted">需要阅读原文时再提取；默认搜索和 AI 建议使用书签元数据。</p><div class="button-row"><el-button :loading="contentPending" :disabled="locked||!selected.some(b=>b.kind==='bookmark')" @click="extractContent">读取内容</el-button><el-button :disabled="locked||!selected.some(b=>b.kind==='bookmark')" @click="inspectContent">内容状态</el-button></div></details></div>
-      <el-table :data="store.rows" v-loading="store.loading" row-key="id" @selection-change="(rows:BookmarkRecord[])=>selected=rows" empty-text="暂无匹配书签。清除搜索、选择其他目录，或收藏一个网址。">
+      <el-table :data="browseRows" v-loading="store.loading" row-key="id" @selection-change="(rows:BookmarkRecord[])=>selected=rows" empty-text="暂无匹配书签。清除搜索、选择其他目录，或收藏一个网址。">
         <el-table-column type="selection" width="42" :selectable="isEditable"/>
         <el-table-column label="书签与目录" min-width="210"><template #default="{row}"><a v-if="safeBookmarkHref(row.url)" class="bookmark-title" :href="safeBookmarkHref(row.url)" target="_blank" rel="noopener noreferrer">{{row.title||'未命名书签'}} ↗</a><button v-else-if="row.kind==='folder'" class="folder-link" @click="pickFolder(row)">▸ {{row.title||'书签根目录'}}</button><strong v-else>{{row.title||'未命名书签'}}</strong><div class="bookmark-url">{{row.url||'原生目录'}}</div><div class="bookmark-path">{{row.path||'根目录'}}</div><div class="row-actions"><button v-if="row.url" class="text-button" @click="copy(row.url)">复制 URL</button><template v-if="isEditable(row)"><button class="text-button" :disabled="locked" @click="openEditor('edit',[row])">{{row.kind==='folder'?'重命名':'编辑'}}</button><button class="text-button" :disabled="locked" @click="openEditor('move',[row])">移动</button><button class="text-button danger" :disabled="locked" @click="prepareDelete([row])">删除</button><button v-if="row.kind==='bookmark'" class="text-button" :disabled="locked" @click="startTask('这个收藏适合用来做什么？请给出具体建议。',[row])">问 AI</button></template></div></template></el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="page" :page-size="200" :total="store.total" layout="prev, pager, next" class="pagination"/>
+      <el-pagination v-if="!activeTopic" v-model:current-page="page" :page-size="200" :total="browseTotal" layout="prev, pager, next" class="pagination"/>
       <section v-if="contentResults.length" class="content-results" aria-live="polite"><div class="section-heading"><h3>内容读取状态</h3><el-button :disabled="locked" @click="clearExtractedContent">清除此批提取内容</el-button></div><p class="muted">结果对应发起读取时的选择。成功提取的有限文本可用于后续对话。</p><article v-for="result in contentResults" :key="result.id" class="reference-card"><div><a v-if="safeBookmarkHref(result.url)" :href="safeBookmarkHref(result.url)" target="_blank" rel="noopener noreferrer">{{result.title}}</a><strong v-else>{{result.title}}</strong><p>{{result.label}}</p><small>{{result.path}}</small><div class="bookmark-url">{{result.url}}</div></div></article></section>
     </section>
 
     <section v-else-if="section==='conversation'" class="results-panel conversation-panel" aria-label="AI 多轮对话">
-      <div class="section-heading"><div><h2>书签助手</h2><p class="muted">{{scopeName}} · 可继续追问，引用始终保留原始 URL</p></div><el-button :disabled="locked" @click="openHistory">历史对话</el-button></div>
+      <div class="section-heading"><div><h2>当前任务</h2><p class="muted">{{scopeName}} · 可继续追问，引用始终保留原始 URL</p></div><el-button :disabled="locked" @click="openHistory">历史对话</el-button></div>
+      <details v-if="sending||!currentReferences.length" class="local-task-results" open><summary>本地匹配 · {{store.total}} 条</summary><p v-if="!store.rows.length" class="muted">暂无关键词匹配，AI 仍可根据任务范围检索。</p><a v-for="row in store.rows.filter(b=>safeBookmarkHref(b.url)).slice(0,8)" :key="row.id" :href="safeBookmarkHref(row.url)" target="_blank" rel="noopener noreferrer">{{row.title||row.url}}</a></details>
+      <button v-if="previousTurnCount" class="text-button previous-turns" @click="previousTurnsOpen=!previousTurnsOpen">{{previousTurnsOpen?'收起之前的回答':`查看之前 ${previousTurnCount} 轮回答`}}</button>
       <div ref="messagesElement" class="messages" @scroll="trackScroll" aria-live="polite" :aria-busy="sending">
-        <div v-if="!session?.messages.length&&!sending" class="chat-empty"><span>✦</span><h3>从“存下来”，到“用起来”</h3><p>在上方写下你的目标，再点“询问 AI”。你可以找资料、比较来源、制定阅读顺序，或请求整理建议。</p><p class="muted">默认使用标题、URL 和目录。只有明确读取内容后，才可能使用已提取的有限文本。所有书签更改都需你审核。</p></div>
-        <article v-for="message in session?.messages" :key="message.id" class="message" :class="message.role"><small>{{message.role==='user'?'你':'书签助手'}}</small><p class="message-text">{{message.text}}</p><div v-if="message.disclosure" class="disclosure">{{message.disclosure.metadataOnly?'仅元数据':'含有限已提取文本'}} · 已发送 {{message.disclosure.transmitted}} / {{message.disclosure.totalInScope}} 条 · 省略 {{message.disclosure.omitted}} 条</div>
-          <section v-if="message.references?.length" class="message-references" aria-label="本轮来源引用"><h3>来源引用（{{message.references.length}}）</h3><div class="reference-grid"><article v-for="r in message.references" :key="r.citationId" class="chat-reference"><a v-if="safeBookmarkHref(r.url)" :href="safeBookmarkHref(r.url)" target="_blank" rel="noopener noreferrer">{{r.citationId}} · {{r.title||r.url}} ↗</a><strong v-else>{{r.citationId}} · {{r.title}}</strong><p>{{r.reason}}</p><small>{{r.path||'根目录'}}</small><div class="bookmark-url">{{r.url}}</div><el-button text size="small" @click="copy(r.url)">复制 URL</el-button></article></div></section>
+        <div v-if="!session?.messages.length&&!sending" class="chat-empty"><span>✦</span><h3>从“存下来”，到“用起来”</h3><p>在上方写下你的目标，再点“开始任务”。你可以找资料、比较来源、制定阅读顺序，或请求整理建议。</p><p class="muted">默认使用标题、URL 和目录。只有明确读取内容后，才可能使用已提取的有限文本。所有书签更改都需你审核。</p></div>
+        <article v-for="message in visibleMessages" :key="message.id" class="message" :class="message.role"><small>{{message.role==='user'?'你':'书签助手'}}</small><p class="message-text">{{message.text}}</p><div v-if="message.disclosure" class="disclosure">{{message.disclosure.metadataOnly?'仅元数据':'含有限已提取文本'}} · 已发送 {{message.disclosure.transmitted}} / {{message.disclosure.totalInScope}} 条 · 省略 {{message.disclosure.omitted}} 条</div>
+          <details v-if="message.references?.length&&message.id!==latestAssistant?.id" class="previous-references"><summary>当时的来源 · {{message.references.length}} 条</summary><p v-for="r in message.references" :key="r.citationId"><a :href="safeBookmarkHref(r.url)" target="_blank" rel="noopener noreferrer">{{r.citationId}} · {{r.title}}</a></p></details>
           <el-button v-if="message.moves?.length||message.edits?.length||message.deletions?.length" class="suggestion-button" @click="showSuggestions(message.id)">审核整理建议（{{(message.moves?.length??0)+(message.edits?.length??0)+(message.deletions?.length??0)}}）</el-button>
         </article>
         <article v-if="sending&&pendingQuestion" class="message user" aria-label="正在发送的问题"><small>你</small><p class="message-text">{{pendingQuestion}}</p></article>
@@ -304,6 +351,7 @@ onUnmounted(()=>{++turnGeneration;turnController?.abort();stopAutomatic();cancel
         <div v-if="sending" class="working-state" role="status"><span class="working-dot"/>{{canceling?'正在停止…':streamingText?'正在继续生成…':'正在检索收藏并等待回复…'}}<span class="muted">可以取消，书签不会自动更改</span></div>
         <p v-if="turnNotice" class="muted" role="status">{{turnNotice}}</p><el-button v-if="turnNeedsReview" :disabled="locked" @click="reviewCurrentTurn">重新核对当前对话</el-button>
       </div>
+      <section v-if="currentReferences.length" class="current-results" aria-label="本轮来源引用"><div class="section-heading"><h3>当前结果 · {{currentReferences.length}} 条</h3><span class="muted">编号沿用原始引用</span></div><ol class="task-result-list"><li v-for="r in currentReferences" :key="r.citationId"><span class="citation-id">{{r.citationId}}</span><div><a v-if="safeBookmarkHref(r.url)" :href="safeBookmarkHref(r.url)" target="_blank" rel="noopener noreferrer">{{r.title||r.url}} ↗</a><strong v-else>{{r.title}}</strong><p>{{r.reason}}</p><p v-if="r.evidenceLabel" class="evidence-label">{{r.evidenceLabel}}</p><small>{{r.path||'根目录'}}</small><div class="bookmark-url">{{r.url}}</div><button class="text-button" @click="copy(r.url)">复制 URL</button></div></li></ol></section>
     </section>
 
     <section v-else class="results-panel" aria-label="整理与更改预览">
@@ -321,9 +369,9 @@ onUnmounted(()=>{++turnGeneration;turnController?.abort();stopAutomatic();cancel
         <el-button v-if="duplicates.length" :disabled="!duplicateSelection.length||locked" @click="prepareDuplicates">预览移除 {{duplicateSelection.length}} 个重复书签</el-button>
       </section>
       <section v-if="plan" class="plan-review" aria-label="更改计划预览">
-        <div class="plan-heading"><h3>{{plan.title}}</h3><el-tag>{{planStatusLabel(plan.status)}}</el-tag><span class="muted">{{plan.steps.length}} 项更改</span></div>
+        <p v-if="!applied&&plan.metadata['plan-service.mode']==='organization'" class="muted">可逐项排除；相关依赖也会移除，并生成新的快照与审核预览。不会直接执行。</p><div class="plan-heading"><h3>{{plan.title}}</h3><el-tag>{{planStatusLabel(plan.status)}}</el-tag><span class="muted">{{plan.steps.length}} 项更改 · {{planSummary}}</span></div>
         <el-alert v-if="applied" :title="`执行结果：${executionCounts.succeeded} 项成功，${executionCounts.failed} 项失败，${executionCounts.compensated} 项已补偿，${executionCounts.skipped} 项已跳过`" :type="executionCounts.failed?'warning':'info'" :closable="false"/>
-        <article v-for="{step,view} in planCards" :key="step.id" class="plan-step"><div class="step-heading"><el-tag :type="step.action==='delete'?'danger':'info'">{{view.action}}</el-tag><strong>{{step.action==='create'?view.targetTitle:view.sourceTitle}}</strong><span class="muted">{{view.risk}}</span><el-tag :type="step.status==='failed'?'danger':step.status==='succeeded'?'success':'info'" size="small">{{stepStatusLabel(step.status)}}</el-tag></div><p>{{step.reason}}</p><el-alert v-if="step.errorMessage" :title="stepErrorLabel(step.errorMessage)" type="warning" :closable="false"/>
+        <article v-for="{step,view} in planCards" :key="step.id" class="plan-step"><div class="step-heading"><el-tag :type="step.action==='delete'?'danger':'info'">{{view.action}}</el-tag><strong>{{step.action==='create'?view.targetTitle:view.sourceTitle}}</strong><span class="muted">{{view.risk}}</span><el-tag :type="step.status==='failed'?'danger':step.status==='succeeded'?'success':'info'" size="small">{{stepStatusLabel(step.status)}}</el-tag></div><p>{{step.reason}}</p><el-button v-if="!applied&&['draft','validated'].includes(plan.status)&&plan.metadata['plan-service.mode']==='organization'" text :disabled="locked" @click="excludeStep(step.id)">排除此项并重新预览</el-button><el-alert v-if="step.errorMessage" :title="stepErrorLabel(step.errorMessage)" type="warning" :closable="false"/>
           <dl><template v-if="step.action!=='create'"><dt>原目录</dt><dd>{{view.sourcePath}}</dd><dt v-if="view.sourceUrl">原始 URL</dt><dd v-if="view.sourceUrl">{{view.sourceUrl}}</dd></template><template v-if="step.action==='delete'"><dt>更改结果</dt><dd>从浏览器原生书签中删除此条目<span v-if="!view.sourceUrl">及其目录内的所有子项</span></dd></template><template v-else><dt>{{step.action==='create'?'创建位置':'目标目录'}}</dt><dd>{{view.targetPath}}</dd><dt v-if="view.targetTitle!==view.sourceTitle&&step.action!=='create'">新标题</dt><dd v-if="view.targetTitle!==view.sourceTitle&&step.action!=='create'">{{view.targetTitle}}</dd><dt v-if="view.targetUrl&&(view.targetUrl!==view.sourceUrl||step.action==='create')">{{step.action==='create'?'网址':'新 URL'}}</dt><dd v-if="view.targetUrl&&(view.targetUrl!==view.sourceUrl||step.action==='create')">{{view.targetUrl}}</dd></template></dl>
           <details class="technical-details"><summary>技术详情</summary><p>书签 ID：{{step.targetBrowserId||'执行时创建'}} · 步骤：{{step.id}}</p><p>索引版本：{{plan.basedOnGeneration}}</p></details>
         </article>
@@ -336,8 +384,8 @@ onUnmounted(()=>{++turnGeneration;turnController?.abort();stopAutomatic();cancel
     </section>
   </main>
 
-  <el-drawer v-model="directoryOpen" title="我的书签目录" direction="ltr" size="min(360px,94vw)"><button class="folder-all" :class="{active:!folderId}" @click="folderId='';section='browse';directoryOpen=false">▤ 全部书签</button><el-tree :data="tree" node-key="id" :current-node-key="folderId" highlight-current :expand-on-click-node="false" :default-expanded-keys="tree.map(node=>node.id)" @node-click="pickFolder"/><el-empty v-if="!tree.length&&!store.loading" description="暂无目录" :image-size="48"/><p class="muted">目录来自浏览器原生书签。选择目录后，在浏览结果中重命名、移动或新建子目录。</p></el-drawer>
-  <el-drawer v-model="historyOpen" title="历史与恢复" size="min(560px,96vw)"><h3>最近的对话</h3><el-empty v-if="!sessions.length" description="还没有对话记录" :image-size="48"/><button v-for="item in sessions" :key="item.id" class="session-row" :disabled="locked" @click="switchSession(item.id)"><strong>{{item.title||'未命名对话'}}</strong><span>继续对话 →</span></button><h3>书签更改记录</h3><p class="muted">查看每次写入的结果，导出备份或审核恢复预览。</p><el-empty v-if="!history.length" description="暂无操作记录" :image-size="48"/><article v-for="item in history" :key="item.id" class="history-card"><div><strong>{{item.title}}</strong><p class="muted">{{new Date(item.createdAt).toLocaleString()}} · {{item.stepCount}} 项更改</p></div><el-tag>{{planStatusLabel(item.status)}}</el-tag><el-button :disabled="locked" @click="viewHistory(item.id)">查看计划</el-button></article></el-drawer>
+  <el-drawer v-model="directoryOpen" title="我的书签目录" direction="ltr" size="min(360px,94vw)"><button class="folder-all" :class="{active:!folderId}" @click="selectedTopicId='';folderId='';section='browse';directoryOpen=false">▤ 全部书签</button><el-tree :data="tree" node-key="id" :current-node-key="folderId" highlight-current :expand-on-click-node="false" :default-expanded-keys="tree.map(node=>node.id)" @node-click="pickFolder"/><el-empty v-if="!tree.length&&!store.loading" description="暂无目录" :image-size="48"/><p class="muted">目录来自浏览器原生书签。选择目录后，在浏览结果中重命名、移动或新建子目录。</p></el-drawer>
+  <el-drawer v-model="historyOpen" title="历史与恢复" size="min(560px,96vw)"><h3>最近任务</h3><el-empty v-if="!sessions.length" description="还没有对话记录" :image-size="48"/><button v-for="item in sessions" :key="item.id" class="session-row" :disabled="locked" @click="switchSession(item.id)"><strong>{{item.title||'未命名对话'}}</strong><span>继续对话 →</span></button><h3>书签更改记录</h3><p class="muted">查看每次写入的结果，导出备份或审核恢复预览。</p><el-empty v-if="!history.length" description="暂无操作记录" :image-size="48"/><article v-for="item in history" :key="item.id" class="history-card"><div><strong>{{item.title}}</strong><p class="muted">{{new Date(item.createdAt).toLocaleString()}} · {{item.stepCount}} 项更改</p></div><el-tag>{{planStatusLabel(item.status)}}</el-tag><el-button :disabled="locked" @click="viewHistory(item.id)">查看计划</el-button></article></el-drawer>
   <BookmarkEditor v-model="editorOpen" :kind="editorKind" :records="editorRecords" :folders="store.folders" :default-parent-id="defaultParent" :busy="busy||sending||contentPending" :initial-bookmark="initialBookmark" :advice="bookmarkAdvice" :requesting-advice="requestingAdvice" :ai-available="settings.hasKey&&settings.consent" :auto-enabled="automaticReady" :advice-error="adviceError" @cancel-advice="cancelBookmarkAdvice" :server-error="editorError" @prepare="prepareManual" @request-advice="requestBookmarkAdvice" @configure-ai="settingsOpen=true" @open-settings="settingsOpen=true" @edit-existing="id=>openExistingBookmark(id,true)" @view-existing="id=>openExistingBookmark(id,false)"/>
   <el-dialog class="tools-dialog" top="4vh" v-model="toolsOpen" title="书签工具" width="min(1100px,96vw)" destroy-on-close><LegacyTools :initial-tab="toolsTab" @preview-delete="prepareHealthDelete"/><template #footer><el-button @click="toolsOpen=false">返回工作台</el-button></template></el-dialog>
 <el-dialog class="settings-dialog" top="4vh" v-model="settingsOpen" :title="onboarding?'欢迎使用 · 连接你的 AI 助手':'AI 连接与数据范围'" width="min(560px,94vw)" @closed="apiKey=''" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy&&!onboarding"><ol v-if="onboarding" class="setup-steps" aria-label="连接步骤"><li>1 · 选择区域并填写密钥</li><li>2 · 选择数据范围</li><li>3 · 保存并测试</li></ol><p v-if="onboarding" class="onboarding-intro">先连接 MiniMax，收藏时获得标题和位置建议，搜索和整理时自动补充建议。填写密钥并选择是否开启自动建议，一次保存并测试即可开始；也可以跳过，所有本地功能照常使用。</p><el-form label-position="top" :disabled="busy"><el-form-item label="MiniMax 服务区域"><el-select v-model="settingsDraft.region"><el-option label="全球区 · api.minimax.io" value="global"/><el-option label="中国区 · api.minimax.cn" value="cn"/></el-select></el-form-item><p v-if="settingsDraft.region!==settings.region" class="setup-notice">保存新区设置会清除原区域密钥。请为新区输入对应密钥；取消不会改变现有设置。</p><p class="muted">请使用所选 MiniMax 区域的 API 密钥。连接测试只发送固定的“Reply with OK.”文本，不含书签；测试可能产生少量 API 费用。</p><el-form-item label="API Key"><el-input v-model="apiKey" type="password" autocomplete="off" :placeholder="settings.hasKey&&settingsDraft.region===settings.region?'留空保留已保存的密钥':'输入此区域的密钥'"/></el-form-item><p role="status">{{settings.hasKey?`已保存密钥 · ${settings.keyStorage==='local'?'此设备本地保存':'仅当前浏览器会话'}${settings.connectionTested&&!settingsDraftChanged?' · 当前配置已测试通过':' · 当前配置未测试'}`:'未配置密钥或会话密钥已过期。'}}</p><el-checkbox v-model="rememberKey">在此设备记住密钥（可选）</el-checkbox><p class="muted">默认只在当前浏览器会话保存，关闭浏览器会话后需重新输入。选择记住后保存在此设备的扩展本地存储，不额外加密，不同步，不包含在导出、备份、历史或日志中。共享设备请勿勾选。</p><el-checkbox v-model="settingsDraft.autoSuggestions" class="consent">自动提供 AI 建议</el-checkbox><p class="muted">自愿开启：收藏草稿稳定后、提交搜索后、进入整理时自动请求。仅发送当前页面标题和网址、查询及最多 60 个候选的元数据和最多 120 个目录；不自动读取正文，不后台扫描全库。每个收藏窗口最多 3 次、工作台最多 6 次；失败不自动重试。MiniMax 可能按用量计费，可随时关闭。</p><details class="privacy-settings"><summary>高级设置 · 模型、隐私与内容增强</summary><el-form-item label="模型"><el-input v-model="settingsDraft.model"/></el-form-item><el-form-item label="模型输出 token 上限"><el-input-number v-model="settingsDraft.maxCompletionTokens" :min="1024" :max="16384" :step="1024" :precision="0" aria-label="模型输出 token 上限"/></el-form-item><p class="muted">默认 4096。提高上限可能增加等待时间和使用费用；仅在输出被截断时按需调整。</p><el-form-item label="不发送给 AI 的目录（包含子目录）"><el-select v-model="settingsDraft.excludedFolderIds" multiple filterable collapse-tags aria-label="排除的 AI 目录"><el-option v-for="f in store.folders" :key="f.id" :label="folderDisplayPath(f)" :value="f.id"/></el-select></el-form-item><p class="muted">修改排除目录会结束当前任务上下文，下次发送创建新任务；已有历史不会自动删除。</p><el-checkbox v-model="settingsDraft.contentEnhancement" class="consent">允许自动补充相关页面的有限文本</el-checkbox><p class="muted">默认关闭。开启后仅读取已授予网站权限的少量相关公开页面，不会为未授权网站弹窗或读取登录状态。网站会收到请求；内容状态中可清除已提取文本。</p></details><el-checkbox v-model="settingsDraft.consent" class="consent">我同意将当前对话范围内选中的候选书签标题、原始 URL、目录路径及已提取的有限文本发送至以上 MiniMax 服务，用于回答问题或生成整理建议；自动建议仅发送元数据，不发送已提取文本。</el-checkbox></el-form><template #footer><div class="settings-feedback" aria-live="polite"><el-alert v-if="settingsError" :title="settingsError" type="error" :closable="false" show-icon/><p v-else-if="settingsSaving" role="status">正在保存并验证，请稍候…</p><p v-else-if="!settingsHasUsableKey" class="muted">尚未填写密钥；你可以先使用全部本地功能。</p></div><div class="settings-actions"><el-button v-if="settings.hasKey" :disabled="busy||sending" @click="clearKey">清除密钥</el-button><el-button v-if="onboarding" :disabled="busy" @click="skipOnboarding">稍后配置，先用本地功能</el-button><el-button v-else :disabled="busy" @click="settingsOpen=false">取消</el-button><el-button v-if="!onboarding" :disabled="busy||sending" @click="saveSettings(false)">保存设置</el-button><el-button type="primary" :loading="busy" :disabled="sending" @click="saveSettings(true)">保存并测试连接</el-button></div></template></el-dialog></div>
@@ -592,4 +640,30 @@ h3{font-size:16px;font-weight:600;margin:0 0 14px}
   .session-row { flex-wrap:wrap; gap:6px; }
 
 }
+/* One task, one current result list; previous turns remain available on demand. */
+.main-pane{max-width:960px;padding-top:30px}
+.results-panel{border:0;border-top:1px solid var(--bookmark-line);border-radius:0;background:transparent;padding:24px 0}
+.goal-panel{margin-bottom:20px}
+.hero-heading h1{font-size:28px}
+.recent-tasks{display:flex;gap:12px;align-items:center;margin:8px 0 16px;color:var(--bookmark-secondary);font-size:12px;overflow:hidden}
+.recent-tasks button{border:0;background:none;color:var(--bookmark-secondary);max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;padding:5px 0}
+.quick-actions>button{border:0;background:transparent;padding:8px 10px}
+.message{border-radius:0;background:transparent;padding:12px 0;margin:0;border-bottom:1px solid var(--bookmark-line-soft)}
+.message.user{margin:0;background:transparent;font-weight:500}
+.message.user>small{display:none}
+.current-results{margin-top:24px}
+.task-result-list{list-style:none;margin:0;padding:0}
+.task-result-list li{display:flex;gap:14px;border-bottom:1px solid var(--bookmark-line);padding:16px 0}
+.task-result-list li>div{min-width:0;flex:1}
+.task-result-list a{font-weight:600;text-decoration:none;overflow-wrap:anywhere}
+.task-result-list a:hover{text-decoration:underline}
+.task-result-list p{line-height:1.7;margin:6px 0;color:var(--bookmark-secondary);font-size:13px}
+.task-result-list small{color:var(--bookmark-secondary)}
+.citation-id{font-size:11px;color:var(--bookmark-secondary);padding-top:3px;min-width:26px}
+.previous-turns{margin-bottom:12px}
+.previous-references summary,.local-task-results summary{cursor:pointer;color:var(--bookmark-secondary);font-size:12px}
+.local-task-results{border-bottom:1px solid var(--bookmark-line);padding:0 0 16px;margin-bottom:16px}
+.local-task-results a{display:block;font-size:13px;overflow-wrap:anywhere;margin-top:10px}
+@media(max-width:520px){.main-pane{padding:20px 16px 40px}.hero-heading h1{font-size:23px}.results-panel{padding:20px 0}.brand small{display:none}.topbar{padding:12px 16px;gap:8px}.brand-mark{display:none}.brand strong{font-size:14px}.header-actions{min-width:0}.topbar{flex-wrap:nowrap}.task-context{gap:6px}.task-context>.muted{width:100%}.recent-tasks{gap:10px}.task-result-list li{gap:10px}.goal-actions small{width:100%}.goal-actions>div{width:100%;justify-content:space-between}}
+.topic-views{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0 20px;color:var(--bookmark-secondary);font-size:12px}.topic-views>span{width:100%}.topic-views small{margin-left:8px}.topic-views>div{display:flex;background:var(--bookmark-surface);border:1px solid var(--bookmark-line);border-radius:8px}.topic-views button{border:0;background:transparent;color:var(--bookmark-secondary);padding:8px;cursor:pointer}.topic-views button.active{color:var(--bookmark-accent);font-weight:600}.topic-views .dismiss-topic{padding-left:2px}.evidence-label{font-size:11px!important}
 </style>
