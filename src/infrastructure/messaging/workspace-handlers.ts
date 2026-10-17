@@ -65,6 +65,13 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     try {return {bookmarks:findExactNativeBookmarks(await readTree(),url)};}
     catch {throw new Error('无法检查当前书签，请重试；未发送 AI 分析请求');}
   };
+  const validCaptureFolderId = (id:unknown):id is string => typeof id==='string' && /^[A-Za-z0-9_-]{1,200}$/.test(id);
+  async function captureFolderExists(id:string):Promise<boolean> {
+    const visit=(nodes:RawBookmarkNode[],hasParent=false):boolean => nodes.some(node=>
+      node.id===id ? hasParent && node.id!=='0' && !node.url && node.type!=='bookmark' && node.type!=='separator' && !('unmodifiable' in node && node.unmodifiable)
+        : !!node.children && visit(node.children,true));
+    return visit(await readTree());
+  }
   const repository=createAssistantRepository(db);
   const outboundRepository:AssistantRepository={...repository,
     async listBookmarks(){const [rows,folders,settings]=await Promise.all([repository.listBookmarks(),repository.listFolders(),readSettings()]);const excluded=excludedFolderSet(folders,settings.excludedFolderIds);return rows.filter(b=>!!b.url&&safeForAssistant(b.url)&&(!b.parentId||!excluded.has(b.parentId)));},
@@ -271,12 +278,19 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     .register('CAPTURE_LOOKUP',async req=>lookupCapture(req.url))
     .register('CAPTURE_STORE',async req=>{
       if(!req.input||typeof req.input.title!=='string'||req.input.title.length>1000||typeof req.input.url!=='string'||req.input.url.length>10000||!/^https?:$/i.test(new URL(req.input.url).protocol))throw new Error('当前页面不是可收藏的网页');
-      const captureId=crypto.randomUUID();await (await storageArea('session')).set({['capture:'+captureId]:{...req.input,createdAt:Date.now()}});return {captureId};
+      const {title,url,parentFolderId}=req.input;
+      if(parentFolderId!==undefined && (!validCaptureFolderId(parentFolderId)||!await captureFolderExists(parentFolderId)))throw new Error('原先选择的目录已不可用，请重新选择保存位置。');
+      const captureId=crypto.randomUUID();await (await storageArea('session')).set({['capture:'+captureId]:{title,url,...(parentFolderId!==undefined?{parentFolderId}:{}),createdAt:Date.now()}});return {captureId};
     })
     .register('CAPTURE_GET',async req=>{
       if(typeof req.captureId!=='string'||!/^[a-zA-Z0-9-]{1,80}$/.test(req.captureId))throw new Error('页面引用无效');
       const key='capture:'+req.captureId;const value=(await (await storageArea('session')).get(key))[key];
-      if(!value||Date.now()-value.createdAt>3600000)return undefined;return {title:value.title,url:value.url};
+      if(!value||Date.now()-value.createdAt>3600000)return undefined;
+      const draft={title:value.title,url:value.url};
+      if(value.parentFolderId===undefined)return draft;
+      try {if(validCaptureFolderId(value.parentFolderId)&&await captureFolderExists(value.parentFolderId))return {...draft,parentFolderId:value.parentFolderId};}
+      catch { /* Recover the text draft even when native destinations cannot be checked. */ }
+      return {...draft,destinationUnavailable:true};
     })
     .register('ASSISTANT_ADVISE_BOOKMARK',async req=>{
       if(settingsMutation)throw new Error('模型设置正在更新，请稍后重试');

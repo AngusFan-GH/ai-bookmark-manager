@@ -77,6 +77,26 @@ async function noBodyOverflow(label) {
  assert(dimensions.scroll<=dimensions.width+1,`${label}: unexpected page horizontal overflow ${JSON.stringify(dimensions)}`);
 }
 
+
+// Visibility alone includes off-screen controls. Check bounds and real hit targets
+// without Playwright auto-scrolling first, so clipped/sticky-footer regressions fail.
+async function reachable(locator, label) {
+ await eventually(async()=>{
+  const state=await locator.evaluate(element=>{
+   const r=element.getBoundingClientRect();const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+   return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:innerWidth,height:innerHeight,hit:!!hit&&element.contains(hit)};
+  });
+  assert(state.left>=0&&state.right<=state.width+1&&state.top>=0&&state.bottom<=state.height+1&&state.hit,`${label}: control clipped or covered ${JSON.stringify(state)}`);
+ });
+}
+async function settingsFooter(dialog,label) {
+ await reachable(dialog.getByRole('button',{name:'保存并测试连接',exact:true}),label+' save/test');
+ await reachable(dialog.locator('.settings-actions button').first(),label+' local/cancel action');
+ const body=dialog.locator('.el-dialog__body');
+ const scroll=await body.evaluate(element=>({height:element.clientHeight,scroll:element.scrollHeight,overflow:getComputedStyle(element).overflowY}));
+ assert(scroll.height>0&&['auto','scroll'].includes(scroll.overflow),label+': settings body must own its scroll');
+}
+
 try {
  context = await chromium.launchPersistentContext(path.join(temp,'profile'), {
   ...(process.env.CHROMIUM_PATH ? {executablePath:process.env.CHROMIUM_PATH} : {channel:'chromium'}), headless:process.env.E2E_HEADED !== '1',
@@ -102,8 +122,20 @@ try {
  // Fresh-profile onboarding must permit a genuinely local-only path.
  const onboarding=page.getByRole('dialog',{name:'欢迎使用 · 连接你的 AI 助手',exact:true});
  await onboarding.waitFor();await screenshot('first-run-onboarding');
+ for(const [width,height] of [[390,600],[768,720],[1440,1000]]) {
+  await page.setViewportSize({width,height});await settingsFooter(onboarding,'onboarding '+width);
+  await screenshot('first-run-onboarding-'+width+'x'+height);
+ }
+ await page.setViewportSize({width:390,height:600});
+ await onboarding.getByRole('button',{name:'保存并测试连接',exact:true}).click();
+ await reachable(onboarding.locator('.settings-feedback'),'onboarding missing-key feedback');
+ await onboarding.getByText('请先输入所选区域的 API Key，再测试连接。',{exact:true}).waitFor();
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),0);
+ assert.equal((await request('ASSISTANT_SETTINGS_GET')).onboardingCompleted,false);
+ await screenshot('first-run-missing-key-390x600');
+ pass('first-run local exit and save actions stay reachable at short/narrow sizes; missing key fails inline without a provider call');
  await onboarding.getByRole('button',{name:'稍后配置，先用本地功能',exact:true}).click();
- await onboarding.waitFor({state:'hidden'});
+ await onboarding.waitFor({state:'hidden'});await page.setViewportSize({width:1440,height:1000});
  assert.equal((await request('ASSISTANT_SETTINGS_GET')).onboardingCompleted,true);
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),0);
  await page.reload();await page.getByText('Bookmark Workspace',{exact:true}).waitFor();
@@ -153,7 +185,14 @@ try {
  await settingsDialog.locator('input[type=password]').fill('synthetic-test-key');
  await choose(settingsDialog.getByRole('checkbox',{name:'在此设备记住密钥（可选）',exact:true}));
  await choose(settingsDialog.getByRole('checkbox',{name:/我同意将当前对话范围/}));
- for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('settings '+width);await screenshot('settings-'+width);}
+ for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('settings '+width);await settingsFooter(settingsDialog,'settings '+width);await screenshot('settings-'+width);}
+ await page.setViewportSize({width:390,height:600});
+ await settingsDialog.locator('.privacy-settings summary').click();
+ await settingsDialog.locator('.el-input-number').scrollIntoViewIfNeeded();
+ await settingsFooter(settingsDialog,'advanced settings 390x600');await screenshot('settings-advanced-390x600');
+ await settingsDialog.locator('.privacy-settings summary').click();
+ await page.setViewportSize({width:1440,height:1000});
+ pass('settings footer remains on screen with independently scrolling advanced options at 390x600');
  await choose(settingsDialog.getByRole('checkbox',{name:'自动提供 AI 建议',exact:true}));
  await settingsDialog.getByRole('button',{name:'保存并测试连接',exact:true}).click();
  await eventually(async()=>assert.equal((await request('ASSISTANT_SETTINGS_GET')).connectionTested,true));
@@ -288,7 +327,7 @@ try {
  await page.getByRole('button',{name:'链接健康',exact:true}).click();
  await toolsDialog.getByText('javascript:void(0)',{exact:true}).waitFor();
  assert.equal(await toolsDialog.locator('a[href^="javascript:"],a[href^="data:"]').count(),0);
- for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('health '+width);await screenshot('health-'+width);}
+ for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('health '+width);await reachable(toolsDialog.getByRole('button',{name:'返回工作台',exact:true}),'health close '+width);await screenshot('health-'+width);}
  await closeDialog(toolsDialog);pass('health leaves unsafe schemes nonclickable and fits four viewport sizes');
  // Historical candidate IDs were deleted and restored under new IDs. Reusing that
  // conversation must fail before transmitting its stale private history.
@@ -317,7 +356,7 @@ try {
  assert.equal(scopeCall.scope.bookmarkIds.length,1);assert.equal(scopeCall.bookmarks.length,1);assert.equal(scopeCall.bookmarks[0].title,'Synthetic Manual Edited');
  pass('selected-bookmark AI task transmits exactly the frozen selection, not all search results');
  await browse();await search('');
- for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('workspace '+width);await screenshot('workspace-'+width);}
+ for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('workspace '+width);await page.locator('.goal-form').scrollIntoViewIfNeeded();await reachable(page.getByRole('button',{name:'本地搜索',exact:true}),'local search '+width);await screenshot('workspace-'+width);}
  await goal().focus();await page.keyboard.type('Synthetic Guide');await page.getByRole('button',{name:'本地搜索',exact:true}).click();
  await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();await page.keyboard.press('Tab');assert(await page.evaluate(()=>document.activeElement!==document.body));
  pass('workspace responsive screenshots and keyboard-driven local search work');
@@ -342,6 +381,7 @@ try {
  };
  const popup=await openNativePopup();
  await popup.getByRole('button',{name:'采用标题',exact:true}).waitFor();
+ await popup.screenshot({path:path.join(artifactDir,'popup-unsaved-inline-advice.png')});
  assert.equal(await popup.getByLabel('标题',{exact:true}).inputValue(),'Synthetic capture page');
  const originalFolder=await popup.getByLabel('保存到',{exact:true}).inputValue();
  assert.notEqual(originalFolder,ids.target);
@@ -392,8 +432,14 @@ try {
  await unknownPopup.waitForTimeout(1200);
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeUnknown);
  assert.equal(await unknownPopup.locator('.inline-suggestion').count(),0);
+ await unknownPopup.screenshot({path:path.join(artifactDir,'popup-lookup-error.png')});
  await worker.evaluate(()=>{chrome.bookmarks.getTree=globalThis.__realGetTree;delete globalThis.__realGetTree;});
+ await unknownPopup.getByRole('button',{name:'重新检查',exact:true}).click();
+ await unknownPopup.getByRole('button',{name:'采用标题',exact:true}).waitFor();
+ assert.equal((await native(()=>chrome.bookmarks.search({url:'https://example.test/unknown-capture'}))).length,0);
+ await unknownPopup.screenshot({path:path.join(artifactDir,'popup-lookup-recovered.png')});
  await unknownPopup.close();
+ pass('native lookup retry recovers inline advice without saving a bookmark');
  pass('failed native capture lookup pauses automatic advice instead of treating unknown status as a new bookmark');
  assert.deepEqual(errors,[]);pass('no uncaught workspace page errors');
  await writeFile(path.join(artifactDir,'report.json'),JSON.stringify({checks,errors,syntheticOnly:true,mockProvider:true,liveProviderTested:false},null,2));

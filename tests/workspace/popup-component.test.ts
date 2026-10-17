@@ -34,6 +34,43 @@ describe('popup quick actions',()=>{
     expect(mocks.request.mock.calls.filter(([p])=>p.type==='EXECUTE')).toHaveLength(1);
     expect(host.textContent).toContain('已收藏');await click('✓ 已收藏');expect(mocks.prepareOrganization).toHaveBeenCalledTimes(1);
   });
+  it('recovers an initialization failure without reopening the popup',async()=>{
+    mocks.query.mockRejectedValueOnce(new Error('Tab read interrupted'));
+    await mount();expect(host.textContent).toContain('Tab read interrupted');expect(host.querySelector('.primary')).toBeNull();
+    await click('重新读取当前页面');
+    expect(host.textContent).not.toContain('Tab read interrupted');expect((host.querySelector('#capture-title') as HTMLInputElement).value).toBe('Current page');
+    await click('确认收藏');expect(mocks.prepareOrganization).toHaveBeenCalledTimes(1);
+  });
+  it('supports Enter to save and prevents repeated preparation while saving',async()=>{
+    let resolve!:(value:unknown)=>void;mocks.prepareOrganization.mockImplementation(()=>new Promise(r=>{resolve=r;}));
+    await mount();const input=host.querySelector('#capture-title') as HTMLInputElement;
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,isComposing:true}));await flush();expect(mocks.prepareOrganization).not.toHaveBeenCalled();
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();
+    expect(mocks.prepareOrganization).toHaveBeenCalledTimes(1);expect(input.disabled).toBe(true);
+    resolve({id:'plan-1'});await flush();expect(host.textContent).toContain('✓ 已收藏');expect(host.textContent).not.toContain('更多编辑');
+  });
+  it('keeps the draft after a pre-execution error and allows a safe retry',async()=>{
+    mocks.prepareOrganization.mockRejectedValueOnce(new Error('Preview unavailable')).mockResolvedValueOnce({id:'plan-2'});
+    await mount();await click('确认收藏');expect(host.textContent).toContain('Preview unavailable');
+    expect((host.querySelector('#capture-title') as HTMLInputElement).value).toBe('Current page');
+    await click('确认收藏');expect(host.textContent).toContain('✓ 已收藏');expect(host.textContent).not.toContain('Preview unavailable');
+    expect(mocks.request.mock.calls.filter(([p])=>p.type==='EXECUTE')).toHaveLength(1);
+  });
+  it('opens one editor for rapid clicks and preserves retry after a failed handoff',async()=>{
+    let reject!:(reason:Error)=>void;mocks.storeCapture.mockImplementationOnce(()=>new Promise((_,r)=>{reject=r;}));
+    await mount();const button=[...host.querySelectorAll('button')].find(b=>b.textContent==='更多编辑')!;
+    button.click();button.click();await flush();expect(mocks.storeCapture).toHaveBeenCalledTimes(1);expect(button.disabled).toBe(true);expect((host.querySelector('.primary') as HTMLButtonElement).disabled).toBe(true);
+    reject(new Error('Draft unavailable'));await flush();expect(host.textContent).toContain('Draft unavailable');expect(button.disabled).toBe(false);
+    await click('更多编辑');expect(mocks.create).toHaveBeenCalledTimes(1);expect(host.textContent).not.toContain('Draft unavailable');
+  });
+  it('suppresses delayed automatic advice while opening the workspace editor',async()=>{
+    let resolveSettings!:(value:unknown)=>void;let resolveCapture!:(value:unknown)=>void;
+    mocks.getAssistantSettings.mockImplementation(()=>new Promise(r=>{resolveSettings=r;}));mocks.storeCapture.mockImplementation(()=>new Promise(r=>{resolveCapture=r;}));
+    await mount();await click('更多编辑');resolveSettings(enabled);await flush();await vi.advanceTimersByTimeAsync(1000);
+    expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect(host.textContent).toContain('正在打开…');
+    resolveCapture({captureId:'opaque-123'});await flush();expect(mocks.create).toHaveBeenCalledTimes(1);
+  });
   it('searches local rows and opens the exact saved URL',async()=>{
     await mount();await search('Found');expect(mocks.request).toHaveBeenCalledWith(expect.objectContaining({type:'BOOKMARKS_LIST',query:'Found',limit:5}));
     const result=host.querySelector('.result') as HTMLButtonElement;result.click();await flush();expect(mocks.create).toHaveBeenCalledWith({url:rawUrl});
@@ -45,10 +82,17 @@ describe('popup quick actions',()=>{
   });
   it('does not silently repeat an execution after an uncertain response',async()=>{
     await mount();mocks.request.mockImplementation(async p=>{if(p.type==='APPROVE')return{token:'token'};throw new Error('Background disconnected');});
-    await click('确认收藏');expect(host.textContent).toContain('请到工作台核对结果');expect((host.querySelector('.primary') as HTMLButtonElement).disabled).toBe(true);
+    await click('确认收藏');expect(host.textContent).toContain('请到工作台核对结果');expect((host.querySelector('.primary') as HTMLButtonElement).disabled).toBe(true);expect(host.textContent).not.toContain('更多编辑');
+    await click('打开工作台核对');expect(mocks.create).toHaveBeenCalledWith({url:'chrome-extension://synthetic/options.html'});
   });
   it('stores captured data privately and opens only an opaque ID',async()=>{
-    await mount();await click('更多编辑');expect(mocks.storeCapture).toHaveBeenCalledWith({title:'Current page',url:rawUrl});expect(mocks.create).toHaveBeenCalledWith({url:'chrome-extension://synthetic/options.html?capture=opaque-123'});
+    await mount();await click('更多编辑');expect(mocks.storeCapture).toHaveBeenCalledWith({title:'Current page',url:rawUrl,parentFolderId:'1'});expect(mocks.create).toHaveBeenCalledWith({url:'chrome-extension://synthetic/options.html?capture=opaque-123'});
+  });
+  it('hands off the explicitly changed destination rather than the default folder',async()=>{
+    mocks.request.mockResolvedValueOnce([{browserId:'0',parentId:null},{browserId:'1',parentId:'0',title:'Bar'},{browserId:'nested',parentId:'1',title:'Chosen folder'}]);
+    await mount();const select=host.querySelector('#capture-folder') as HTMLSelectElement;select.value='nested';select.dispatchEvent(new Event('change'));await flush();
+    await click('更多编辑');expect(mocks.storeCapture).toHaveBeenCalledWith({title:'Current page',url:rawUrl,parentFolderId:'nested'});
+    expect(mocks.create).toHaveBeenCalledWith({url:'chrome-extension://synthetic/options.html?capture=opaque-123'});
   });
   it('does not collect or save restricted pages',async()=>{
     mocks.query.mockResolvedValue([{windowId:7,title:'Settings',url:'chrome://settings'}]);await mount();expect(host.textContent).toContain('这个页面无法快捷收藏');expect(host.querySelector('.primary')).toBeNull();expect(mocks.prepareOrganization).not.toHaveBeenCalled();

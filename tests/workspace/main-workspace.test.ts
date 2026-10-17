@@ -8,7 +8,7 @@ vi.mock('../../src/store',()=>({useBookmarkStore:()=>({...mocks,...state})}));
 vi.mock('../../src/workspace-client',()=>mocks);
 vi.mock('element-plus',()=>({ElMessage:{success:vi.fn(),error:vi.fn(),info:vi.fn()},ElMessageBox:{confirm:mocks.confirm}}));
 vi.mock('../../entrypoints/options/LegacyTools.vue',()=>({default:defineComponent({render:()=>h('div','Tools')})}));
-vi.mock('../../entrypoints/options/components/BookmarkEditor.vue',()=>({default:defineComponent({props:['modelValue','kind','serverError','records'],emits:['prepare'],setup(props,{emit}){return()=>props.modelValue?h('section',[h('p',props.serverError),h('p',props.records?.[0]?.title),h('button',{onClick:()=>emit('prepare',{title:'Manual change',steps:[{action:props.kind==='bookmark'?'create':'delete',targetBrowserId:'saved',parentBrowserId:'bar',desiredAfter:{title:'New',url:'https://example.test'}}]})},'Editor preview')]):null;}})}));
+vi.mock('../../entrypoints/options/components/BookmarkEditor.vue',()=>({default:defineComponent({props:['modelValue','kind','serverError','records','defaultParentId'],emits:['prepare'],setup(props,{emit}){return()=>props.modelValue?h('section',[h('p',props.serverError),h('p',props.records?.[0]?.title),h('p',{'data-editor-parent':true},props.defaultParentId),h('button',{onClick:()=>emit('prepare',{title:'Manual change',steps:[{action:props.kind==='bookmark'?'create':'delete',targetBrowserId:'saved',parentBrowserId:'bar',desiredAfter:{title:'New',url:'https://example.test'}}]})},'Editor preview')]):null;}})}));
 const passthrough=defineComponent({setup(_,{slots}){return()=>h('div',[slots.header?.(),slots.default?.(),slots.footer?.()]);}});
 let app:App|undefined;let host:HTMLDivElement;
 const bookmark=(index=1):BookmarkRecord=>({id:`b${index}`,browserId:`b${index}`,kind:'bookmark',parentId:'bar',index,title:`Saved ${index}`,path:'Bookmarks bar',url:`https://example.test/${index}`,updatedAt:1,syncGeneration:1});
@@ -68,4 +68,51 @@ describe('existing bookmark capture navigation',()=>{
  it('opens the fresh native record for editing without automatic analysis',async()=>{window.history.replaceState(null,'','/?edit=already-saved');const get=vi.fn(async()=>[{id:'already-saved',parentId:'bar',title:'Existing native title',url:'https://example.test/existing?Case=YES#frag',index:2}]);vi.stubGlobal('chrome',{permissions:{request:mocks.permission},bookmarks:{get}});mocks.getAssistantSettings.mockResolvedValue(configured);mount();await flush();expect(get).toHaveBeenCalledWith('already-saved');expect(mocks.sync).toHaveBeenCalled();expect(host.textContent).toContain('Existing native title');expect(button('Editor preview')).toBeTruthy();expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect(window.location.search).not.toContain('edit=');});
  it('opens a specific saved location in browse mode without creating or analyzing a duplicate',async()=>{window.history.replaceState(null,'','/?view=saved-here');const get=vi.fn(async()=>[{id:'saved-here',parentId:'bar',title:'Existing location',url:'https://example.test/existing?Case=YES#frag',index:2}]);vi.stubGlobal('chrome',{permissions:{request:mocks.permission},bookmarks:{get}});mount();await flush();await new Promise(resolve=>setTimeout(resolve,220));expect(get).toHaveBeenCalledWith('saved-here');expect(mocks.load).toHaveBeenLastCalledWith('https://example.test/existing?Case=YES#frag','bar',0);expect(window.location.search).not.toContain('view=');expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect(mocks.prepareOrganization).not.toHaveBeenCalled();});
  it('keeps a missing native bookmark error visible and never substitutes a new capture',async()=>{window.history.replaceState(null,'','/?edit=gone');vi.stubGlobal('chrome',{permissions:{request:mocks.permission},bookmarks:{get:vi.fn(async()=>[])}});mount();await flush();expect(host.textContent).toContain('已移动或删除');expect(mocks.adviseBookmark).not.toHaveBeenCalled();expect([...host.querySelectorAll('button')].some(b=>b.textContent==='Editor preview')).toBe(false);});
+});
+
+describe('settings recovery and actionable feedback',()=>{
+ it('keeps first-use actions present and validates a missing key before requesting permissions or saving',async()=>{
+  mocks.getAssistantSettings.mockResolvedValue({...configured,hasKey:false,onboardingCompleted:false});mount();await flush();
+  expect(host.querySelector('.setup-steps')?.textContent).toContain('保存并测试');
+  expect(host.querySelector('.settings-actions')?.textContent).toContain('稍后配置，先用本地功能');
+  await click('保存并测试连接');
+  expect(host.querySelector('.settings-feedback')?.textContent).toContain('请先输入所选区域的 API Key');
+  expect(mocks.permission).not.toHaveBeenCalled();expect(mocks.saveAssistantSettings).not.toHaveBeenCalled();expect(mocks.testAssistantConnection).not.toHaveBeenCalled();
+ });
+ it('does not treat a key saved for another region as usable for the new region',async()=>{
+  mocks.getAssistantSettings.mockResolvedValue(configured);mount();await flush();await click('AI 设置');
+  const region=[...host.querySelectorAll('select')].find(select=>[...select.options].some(option=>option.value==='cn'))!;
+  region.value='cn';region.dispatchEvent(new Event('change'));await flush();await click('保存并测试连接');
+  expect(host.querySelector('.settings-feedback')?.textContent).toContain('请先输入所选区域');expect(mocks.permission).not.toHaveBeenCalled();expect(mocks.saveAssistantSettings).not.toHaveBeenCalled();
+ });
+ it('reports a failed save honestly and preserves the entered key for retry',async()=>{
+  mocks.getAssistantSettings.mockResolvedValue(configured);mocks.saveAssistantSettings.mockRejectedValueOnce(new Error('Storage unavailable'));mount();await flush();await click('AI 设置');
+  setInput(host.querySelector('input[type=password]')!,'synthetic-retry-key');await flush();await click('保存并测试连接');
+  expect(host.querySelector('.settings-feedback')?.textContent).toContain('设置未保存');expect(host.textContent).not.toContain('设置已保存');
+  expect((host.querySelector('input[type=password]')! as HTMLInputElement).value).toBe('synthetic-retry-key');expect(mocks.testAssistantConnection).not.toHaveBeenCalled();expect(button('取消').disabled).toBe(false);
+ });
+ it('prevents duplicate save requests while awaiting the connection test and unlocks after failure',async()=>{
+  let reject!:(error:Error)=>void;mocks.getAssistantSettings.mockResolvedValue(configured);mocks.testAssistantConnection.mockImplementationOnce(()=>new Promise((_resolve,r)=>reject=r));mount();await flush();await click('AI 设置');await click('保存并测试连接');
+  expect(button('保存并测试连接').disabled).toBe(true);expect(button('取消').disabled).toBe(true);button('保存并测试连接').click();await flush();expect(mocks.saveAssistantSettings).toHaveBeenCalledTimes(1);
+  reject(new Error('Connection failed'));await flush();expect(host.querySelector('.settings-feedback')?.textContent).toContain('设置已保存，但连接测试未通过');expect(button('保存并测试连接').disabled).toBe(false);
+ });
+});
+
+
+describe('capture destination handoff',()=>{
+ it('restores the chosen popup folder instead of replacing it with the first default folder',async()=>{
+  state.folders.push({id:'chosen',browserId:'chosen',parentId:'bar',title:'Chosen',path:'Bookmarks bar / Chosen',index:0,updatedAt:1,syncGeneration:1});
+  window.history.replaceState(null,'','/?capture=draft-id');mocks.getCapture.mockResolvedValue({title:'Draft',url:'https://example.test/draft',parentFolderId:'chosen'});mount();await flush();
+  expect(host.querySelector('[data-editor-parent]')?.textContent).toBe('chosen');expect(mocks.prepareOrganization).not.toHaveBeenCalled();
+ });
+ it.each([{parentFolderId:'deleted-folder'},{destinationUnavailable:true}])('keeps a recoverable draft and explains when its destination is no longer available: %j',async(extra)=>{
+  window.history.replaceState(null,'','/?capture=draft-id');mocks.getCapture.mockResolvedValue({title:'Draft',url:'https://example.test/draft',...extra});mount();await flush();
+  expect(host.textContent).toContain('原先选择的目录已不可用');expect(host.querySelector('[data-editor-parent]')?.textContent).toBe('bar');expect(button('Editor preview')).toBeTruthy();expect(mocks.prepareOrganization).not.toHaveBeenCalled();
+ });
+});
+
+
+it('does not mislabel a completion failure as a failed connection after the test succeeded',async()=>{
+ mocks.getAssistantSettings.mockResolvedValue({...configured,onboardingCompleted:false});mocks.testAssistantConnection.mockResolvedValue(configured);mocks.completeOnboarding.mockRejectedValueOnce(new Error('Storage unavailable'));mount();await flush();await click('保存并测试连接');
+ expect(host.querySelector('.settings-feedback')?.textContent).toContain('连接测试已通过，但未能完成引导');expect(host.textContent).not.toContain('连接测试未通过');expect(button('稍后配置，先用本地功能').disabled).toBe(false);expect(mocks.testAssistantConnection).toHaveBeenCalledTimes(1);
 });

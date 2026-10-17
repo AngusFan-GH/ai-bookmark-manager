@@ -44,3 +44,20 @@ A PASS line is emitted only after its assertions run. `report.json` records comp
 ## Environment history
 
 The earlier nine-check suite passed in GitHub Actions on 2026-10-16. Local Chromium launch in the assistant execution sandbox was blocked by process socket restrictions, so runtime validation uses isolated CI. The expanded suite must pass against the redesigned build before its new assertions can be called verified.
+
+## Human-use regression matrix
+
+| Journey | Rendered browser evidence | Negative / boundary coverage |
+| --- | --- | --- |
+| First install | Local-only exit and save/test actions are hit-testable at 390×600, 768×720 and 1440×1000 | Missing key stays inline, makes no provider call, and leaves onboarding incomplete |
+| AI setup | Save/cancel controls stay in the viewport; advanced form scrolls independently | Empty model validation; cancel preserves settings; fixed connectivity prompt excludes bookmarks |
+| Search and scope | Local result table, two-turn conversation, historical session and selected-only scope | Canceled/stale suggestions; missing consent; stale history rejected before transmission; 429 retains draft |
+| Native popup | Before-save inline advice, quick save and multiple current native locations | Applying one suggestion leaves other fields intact; failed authoritative lookup pauses advice; retry recovers without saving |
+| Review and recovery | Readable native add/edit/move and AI dependent folder/move plans | Approval gate, exact typed deletion, repeat-execution block, separate inverse-plan review |
+| Import | File chooser, additive preview and nested native recovery | Same-file reopening resets advanced merge; explicit review required; original URL preserved |
+| Health and tools | Unsafe URLs remain plain text; return action stays hit-testable | No real external scan; opening tools preserves search state |
+| Responsive / keyboard | Workspace, dialogs and sidepanel document at four widths | Document overflow plus actual local-search control bounds; keyboard search and focus movement |
+
+Settings and popup evidence includes new short-viewport and pre-save screenshots. A screenshot's existence does not prove its assertion passed: use the matching run's report. The suite does not claim complete WCAG conformance, screen-reader testing, live health classification, permission-dialog acceptance, or live provider quality.
+
+On 2026-10-17 the baseline 28-check run (38992898370, commit e9f8c661) was visually audited. First-run/settings and health dialogs had actions below the initial viewport, which motivates the new footer geometry checks. A fresh temporary-profile cloud-shell Chromium launch again failed before rendering with `socket() failed: Operation not permitted`; no permission bypass or existing profile was used. The expanded checks require a subsequent isolated CI run before being considered verified.

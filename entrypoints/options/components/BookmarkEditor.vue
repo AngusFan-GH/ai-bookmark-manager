@@ -164,9 +164,9 @@ async function submit() {
     </template>
 
     <form id="bookmark-editor-form" class="editor-form" novalidate :aria-busy="pending" @submit.prevent="submit">
-      <div v-if="kind === 'bookmark' && existingBookmarks.length" class="saved-status" role="status"><strong>这个页面已收藏</strong><p v-for="bookmark in existingBookmarks" :key="bookmark.browserId">{{ bookmark.path || bookmark.title }} <el-button link size="small" @click="emit('view-existing', bookmark.browserId)">查看</el-button><el-button link size="small" @click="emit('edit-existing', bookmark.browserId)">编辑已有书签</el-button></p><span>你也可以继续预览，另存一份。</span></div>
+      <div v-if="kind === 'bookmark' && existingBookmarks.length" class="saved-status" role="status"><strong>这个页面已收藏</strong><p v-for="bookmark in existingBookmarks" :key="bookmark.browserId">{{ bookmark.path || bookmark.title }} <el-button link size="small" :disabled="pending" @click="emit('view-existing', bookmark.browserId)">查看</el-button><el-button link size="small" :disabled="pending" @click="emit('edit-existing', bookmark.browserId)">编辑已有书签</el-button></p><span>你也可以继续预览，另存一份。</span></div>
       <p v-if="kind === 'bookmark' && lookupState === 'checking'" class="field-hint" role="status">正在检查是否已收藏…</p>
-      <p v-if="kind === 'bookmark' && lookupState === 'error'" class="field-hint">暂时无法确认收藏状态，已暂停建议；继续保存可能产生重复书签。<el-button link size="small" @click="checkExisting">重新检查</el-button></p>
+      <p v-if="kind === 'bookmark' && lookupState === 'error'" class="field-hint">暂时无法确认收藏状态，已暂停建议；继续保存可能产生重复书签。<el-button link size="small" :disabled="pending" @click="checkExisting">重新检查</el-button></p>
       <div v-if="kind === 'move'"  class="selection-summary">
         <div class="selection-summary-heading"><span>已选择</span><span class="selection-count">{{ selectionCount }} 个条目</span></div>
         <ul>
@@ -206,7 +206,7 @@ async function submit() {
       <div v-else class="current-location"><el-icon aria-hidden="true"><FolderOpened /></el-icon><div><span>当前目录</span><p>{{ currentFolder }}</p></div></div>
 
       <p v-if="kind === 'bookmark' && requestingAdvice" class="field-hint" role="status">正在看看有没有更合适的标题和位置…</p>
-      <p v-if="kind === 'bookmark' && confirmedUnsaved && !autoEnabled" class="field-hint">需要标题和目录建议？<el-button link size="small" @click="emit('open-settings')">设置 AI</el-button></p>
+      <p v-if="kind === 'bookmark' && confirmedUnsaved && !autoEnabled" class="field-hint">需要标题和目录建议？<el-button link size="small" :disabled="pending" @click="emit('open-settings')">设置 AI</el-button></p>
       <p v-if="kind === 'bookmark' && confirmedUnsaved && adviceError" class="field-hint">暂时没有建议，不影响保存。<el-button link size="small" :disabled="pending || requestingAdvice" @click="requestAdvice">重试建议</el-button></p>
       <el-alert v-if="serverError" :title="serverError" type="error" :closable="false" show-icon />
       <div v-if="errors.form" class="form-error" role="alert">{{ errors.form }}</div>
@@ -247,11 +247,12 @@ async function submit() {
 .selection-summary li .el-icon { color: #7688a4; flex: 0 0 auto; }
 .selection-more { font-size: 12px; color: #68778e; margin: 10px 0 0 22px; }
 .current-location { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid #e7ebf3; border-radius: 10px; background: #f8f9fc; }
+.current-location > div { min-width: 0; }
 .current-location > .el-icon { color: #7b89a0; margin-top: 3px; }
 .current-location span { color: #68778e; font-size: 12px; }
 .current-location p { margin: 4px 0 0; color: #34435a; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .form-error { padding: 11px 13px; border: 1px solid #f2d4d4; background: #fff7f6; color: #a33a40; font-size: 13px; line-height: 1.65; border-radius: 9px; }
-.inline-suggestion { display:flex;gap:10px;align-items:center;color:#68778e;font-size:12px;line-height:1.6;margin:7px 0 0; }.inline-suggestion span {flex:1}.saved-status {border-left:2px solid #a9c4b0;padding-left:12px;color:#526b59;font-size:12px;line-height:1.7}.saved-status p{margin:4px 0}.saved-status>span{color:#68778e}
+.inline-suggestion { display:flex;gap:10px;align-items:center;color:#68778e;font-size:12px;line-height:1.6;margin:7px 0 0; }.inline-suggestion span {flex:1;min-width:0;overflow-wrap:anywhere}.inline-suggestion .el-button{flex-shrink:0}.saved-status {overflow-wrap:anywhere;border-left:2px solid #a9c4b0;padding-left:12px;color:#526b59;font-size:12px;line-height:1.7}.saved-status p{margin:4px 0}.saved-status>span{color:#68778e}
 .preview-note { display: flex; align-items: flex-start; gap: 8px; padding-top: 1px; color: #68778e; }
 .preview-dot { width: 6px; height: 6px; border-radius: 50%; background: #8799ce; margin-top: 7px; flex: 0 0 auto; }
 .preview-note p { margin: 0; font-size: 12px; line-height: 1.7; }
