@@ -40,12 +40,16 @@ export function previewSuggestionText(content: string): string {
   return sanitizeModelText(decoded);
 }
 
-/** SSE records and UTF-8 may split at any byte. A clean stop AND [DONE] are
- * required; a readable JSON prefix is never proof that generation completed. */
+/** SSE records and UTF-8 may split at any byte. Require an explicit stop plus
+ * [DONE] or clean transport EOF. MiniMax's verifier documents implementations
+ * omitting [DONE]; EOF alone, a failed read, or partial JSON never proves success.
+ * Confirmed for CN MiniMax-M2.5 by sanitized CI run 39000442154: one stop,
+ * clean EOF, no DONE, and no trailing frame data. The service still validates
+ * the complete JSON before persisting any turn. */
 export async function readMiniMaxStream(response: Response, signal?: AbortSignal, onContent?: (content: string) => void): Promise<ProviderResult> {
   if (!response.body || !response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) throw invalid();
   const reader = response.body.getReader(); const decoder = new TextDecoder('utf-8', { fatal: true });
-  let pending = ''; let content = ''; let bytes = 0; let stopped = false; let doneMarker = false;
+  let pending = ''; let content = ''; let bytes = 0; let stopped = false; let doneMarker = false; let cleanEof = false;
   const abort = () => { void reader.cancel().catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   function record(raw: string) {
@@ -78,7 +82,7 @@ export async function readMiniMaxStream(response: Response, signal?: AbortSignal
       if (signal?.aborted) throw new AssistantError('canceled', '请求已停止');
       const next = await reader.read();
       if (signal?.aborted) throw new AssistantError('canceled', '请求已停止');
-      if (next.done) { pending += decoder.decode(); break; }
+      if (next.done) { pending += decoder.decode(); cleanEof = true; break; }
       bytes += next.value.byteLength; if (bytes > 2_000_000) throw invalid();
       pending += decoder.decode(next.value, { stream: true });
       let boundary;
@@ -89,7 +93,7 @@ export async function readMiniMaxStream(response: Response, signal?: AbortSignal
       // Do not wait for an HTTP socket to close after the explicit SSE terminator.
       if (doneMarker) { if (pending.trim()) throw invalid(); break; }
     }
-    if (pending.trim() || !stopped || !doneMarker || !content.trim()) throw invalid();
+    if (pending.trim() || !stopped || (!doneMarker && !cleanEof) || !content.trim()) throw invalid();
     return { message: {role: 'assistant', content}, finishReason: 'stop' };
   } finally { signal?.removeEventListener('abort', abort); await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }

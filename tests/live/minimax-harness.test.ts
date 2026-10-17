@@ -8,27 +8,29 @@ const reference = { bookmarkId: 'synthetic-typescript', reason: 'Matches beginne
 function response(content: unknown, usage: unknown = { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 }) {
   return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: typeof content === 'string' ? content : JSON.stringify(content) }, finish_reason: 'stop' }], usage }), { status: 200 });
 }
-function streamedResponse(content: unknown, options: { finish?: string; done?: boolean; singleChunk?: boolean } = {}) {
+function streamedResponse(content: unknown, options: { finish?: string; done?: boolean; singleChunk?: boolean; omitStop?: boolean; readError?: boolean; partialRecord?: boolean } = {}) {
   const json = JSON.stringify(content);
   const frame = (delta: object, finish_reason: string | null = null) => `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
   const chunks = [frame({ role: 'assistant', reasoning_content: 'PRIVATE_REASONING_SENTINEL' })];
   if (options.singleChunk) chunks.push(frame({ content: json }));
   else for (let i = 0; i < json.length; i += 7) chunks.push(frame({ content: json.slice(i, i + 7) }));
-  chunks.push(frame({}, options.finish ?? 'stop'));
+  if (!options.omitStop) chunks.push(frame({}, options.finish ?? 'stop'));
+  if (options.partialRecord) chunks.push('data: {');
   if (options.done !== false) chunks.push('data: [DONE]\n\n');
   return new Response(new ReadableStream({ async pull(controller) {
     await Promise.resolve();
     const chunk = chunks.shift();
-    if (chunk === undefined) controller.close();
+    if (chunk === undefined && options.readError) controller.error(new Error('SYNTHETIC_PRIVATE_READ_ERROR'));
+    else if (chunk === undefined) controller.close();
     else controller.enqueue(new TextEncoder().encode(chunk));
   } }), { headers: { 'content-type': 'text/event-stream' } });
 }
-function successfulFetch() {
+function successfulFetch(options: { done?: boolean } = {}) {
   return vi.fn<typeof fetch>()
     .mockResolvedValueOnce(response('OK'))
-    .mockResolvedValueOnce(streamedResponse(suggestion({ references: [reference] })))
-    .mockResolvedValueOnce(streamedResponse(suggestion({ references: [reference] })))
-    .mockResolvedValueOnce(streamedResponse(suggestion({ moves: [{ bookmarkId: 'synthetic-cooking', targetFolderId: 'synthetic-recipes', reason: 'Recipe topic.' }] })))
+    .mockResolvedValueOnce(streamedResponse(suggestion({ references: [reference] }), options))
+    .mockResolvedValueOnce(streamedResponse(suggestion({ references: [reference] }), options))
+    .mockResolvedValueOnce(streamedResponse(suggestion({ moves: [{ bookmarkId: 'synthetic-cooking', targetFolderId: 'synthetic-recipes', reason: 'Recipe topic.' }] }), options))
     .mockResolvedValueOnce(response({ title: 'Vegetarian recipes', targetFolderId: 'synthetic-recipes', reason: 'Recipe topic.' }));
 }
 describe('live acceptance gates and reporting (offline)', () => {
@@ -71,6 +73,17 @@ describe('live acceptance gates and reporting (offline)', () => {
     expect(JSON.stringify(report)).not.toContain('synthetic-key-not-a-credential');
     expect(JSON.stringify(report)).not.toContain('MAPLE42');
   });
+  it('accepts five-call flow with explicit stop plus clean EOF and no DONE', async () => {
+    const fetcher = successfulFetch({ done: false });
+    const report = await runLiveAcceptance('synthetic-key', fetcher);
+    expect(report.passed).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(5);
+    for (const call of report.calls.filter(call => call.streamRequested)) {
+      expect(call.stopValidated).toBe(true);
+      expect(call.incrementalPreview).toBe(true);
+      expect(call.sseDiagnostics).toMatchObject({ stopFrames: 1, doneMarkers: 0, eof: true, trailingData: false, readFailed: false });
+    }
+  });
   it('stops on authentication failure, with no retry or raw response disclosure', async () => {
     const secret = 'fake-secret-must-never-be-reported';
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(secret, { status: 401 }));
@@ -109,13 +122,14 @@ describe('live acceptance gates and reporting (offline)', () => {
     expect(report.checks[1]).toEqual({ phase: 'recommendation', passed: true });
     expect(report.calls[1].incrementalPreview).toBe(true);
   });
-  it.each([{ finish: 'length' }, { done: false }, { singleChunk: true }])('fails closed on truncated or nonincremental SSE: %j', async options => {
+  it.each([{ finish: 'length' }, { done: false, omitStop: true }, { omitStop: true }, { done: false, readError: true }, { done: false, partialRecord: true }, { singleChunk: true }])('fails closed on truncated or nonincremental SSE: %j', async options => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('OK')).mockResolvedValueOnce(streamedResponse(suggestion({ references: [reference] }), options));
     const report = await runLiveAcceptance('synthetic-key', fetcher);
     expect(report.passed).toBe(false);
     expect(report.checks.at(-1)).toMatchObject({ phase: 'recommendation', passed: false });
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(report)).not.toContain('PRIVATE_REASONING_SENTINEL');
+    expect(JSON.stringify(report)).not.toContain('SYNTHETIC_PRIVATE_READ_ERROR');
   });
   it('rejects JSON fallback instead of falsely claiming genuine streaming', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('OK')).mockResolvedValueOnce(response(suggestion({ references: [reference] })));

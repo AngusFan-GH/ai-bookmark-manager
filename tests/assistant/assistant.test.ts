@@ -597,3 +597,23 @@ describe('stream turn terminal ownership',()=>{
   expect(result.lastTurnRequestId).toBe('committed');expect(result.messages).toHaveLength(2);expect(h.rows.get(session.id)?.revision).toBe(1);
  });
 });
+
+
+describe('M2.5 clean-EOF completion still requires full domain validation',()=>{
+  const stream=(content:string)=>new Response(
+    `data: ${JSON.stringify({choices:[{index:0,delta:{content}}]})}\n\n`
+      +'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+    {headers:{'content-type':'text/event-stream'}},
+  );
+  it('saves a complete valid answer exactly once after explicit stop and clean EOF',async()=>{
+    const fetcher=vi.fn(async()=>stream(output().content));const h=setup(undefined,undefined,createMiniMaxProvider(fetcher as typeof fetch));
+    const session=await h.service.createSession({mode:'recommend'});const result=await h.service.turn({...input(session.id),onText:()=>{}});
+    expect(result.messages).toHaveLength(2);expect(result.providerHistory).toHaveLength(2);expect(result.messages[1].references?.[0].bookmarkId).toBe('a');expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each(['{"text":"incomplete',output(['unknown']).content,output(['a'],{unknown:true}).content])('rejects invalid JSON/schema/IDs after stop and clean EOF without persisting a turn %#',async content=>{
+    const fetcher=vi.fn(async()=>stream(content));const h=setup(undefined,undefined,createMiniMaxProvider(fetcher as typeof fetch));
+    const session=await h.service.createSession({mode:'recommend'});
+    await expect(h.service.turn({...input(session.id),onText:()=>{}})).rejects.toMatchObject({code:'validation'});
+    expect(h.rows.get(session.id)?.messages).toEqual([]);expect(h.rows.get(session.id)?.providerHistory).toEqual([]);expect(fetcher).toHaveBeenCalledOnce();
+  });
+});
