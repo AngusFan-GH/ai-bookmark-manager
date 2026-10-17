@@ -567,14 +567,23 @@ try {
  pass('selected-bookmark AI task transmits exactly the frozen selection, not all search results');
  checkpoint('virtual themes and task resume');
  await page.getByRole('button',{name:'新任务',exact:true}).click();
- await page.getByRole('combobox',{name:'新任务的书签范围',exact:true}).click();
+ // Element Plus overlays its internal input with the visible selected label.
+ // Click the actual user-facing select, then verify its accessible expanded state.
+ const taskScope=page.locator('.task-context .el-select');
+ const taskScopeInput=taskScope.getByRole('combobox',{name:'新任务的书签范围',exact:true});
+ await reachable(taskScope,'new-task scope selector');
+ await taskScope.click();
+ assert.equal(await taskScopeInput.getAttribute('aria-expanded'),'true');
  await page.getByRole('option',{name:'全部书签',exact:true}).click();
+ await taskScope.getByText('全部书签',{exact:true}).waitFor();
+ assert.equal(await taskScopeInput.getAttribute('aria-expanded'),'false');
  const treeBeforeThemes=await native(()=>chrome.bookmarks.getTree());
  await worker.evaluate(()=>{globalThis.__mockMode='theme';});
  await goal().fill('Group my synthetic reading sources into a useful theme');
  await page.getByRole('button',{name:'开始任务',exact:true}).click();
  const themes=page.getByRole('navigation',{name:'虚拟主题视图',exact:true});
  await themes.getByRole('button',{name:'Synthetic AI Folder · 2',exact:true}).waitFor();
+ assert.deepEqual(await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content).scope),{},'New theme task must use the visibly selected all-bookmarks scope');
  await themes.getByText('不改变原生目录',{exact:true}).waitFor();
  await themes.getByRole('button',{name:'Synthetic AI Folder · 2',exact:true}).click();
  assert.equal(await page.locator('.results-panel tbody tr').count(),2);
