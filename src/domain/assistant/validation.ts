@@ -21,7 +21,15 @@ export function sanitizeModelText(value: string): string {
 }
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function keys(value: Record<string, unknown>, expected: string[]): boolean { return Object.keys(value).every(k => expected.includes(k)) && expected.every(k => k in value); }
-function fail(message = '模型建议未通过安全校验（字段、书签或文件夹 ID 不符合要求）。请缩小范围后重试；未保存或执行任何建议。'): never { throw new AssistantError('validation', message); }
+const VALIDATION_MESSAGE = '模型建议未通过安全校验（字段、书签或文件夹 ID 不符合要求）。请缩小范围后重试；未保存或执行任何建议。';
+/** Fixed categories only: diagnostics must never contain model text or supplied IDs. */
+export const SUGGESTION_VALIDATION_REASONS = ['invalid-json', 'root-schema', 'reference-schema', 'reference-id', 'duplicate-reference', 'folder-schema', 'folder-id', 'duplicate-folder', 'move-schema', 'move-bookmark-id', 'move-target-id', 'duplicate-action', 'edit-schema', 'edit-bookmark-id', 'deletion-schema', 'deletion-bookmark-id', 'read-only-action', 'empty-result', 'response-limit', 'incomplete-thinking'] as const;
+export type SuggestionValidationReason = typeof SUGGESTION_VALIDATION_REASONS[number];
+export class SuggestionValidationError extends AssistantError {
+  constructor(public readonly validationReason: SuggestionValidationReason, message = VALIDATION_MESSAGE) { super('validation', message); }
+}
+function fail(message = VALIDATION_MESSAGE): never { throw new AssistantError('validation', message); }
+function invalid(reason: SuggestionValidationReason, message?: string): never { throw new SuggestionValidationError(reason, message); }
 /** Null means an outer reasoning wrapper is incomplete. Nested wrappers must
  * close at depth zero before any following JSON may be treated as an answer. */
 export function stripLeadingThinking(content: string): string | null {
@@ -38,66 +46,84 @@ export function stripLeadingThinking(content: string): string | null {
   return text;
 }
 /** Unwrap only complete outer wrappers. Never extract arbitrary JSON from prose or repair partial actions. */
-function unwrapResponse(content: string): string {
+function unwrapResponse(content: string, suggestion = false): string {
   const text = stripLeadingThinking(content.trim());
-  if (text === null) fail('模型只返回了未完成的思考内容。请提高输出 token 上限或缩小范围后重试；未保存或执行任何建议。');
+  if (text === null) {
+    const message = '模型只返回了未完成的思考内容。请提高输出 token 上限或缩小范围后重试；未保存或执行任何建议。';
+    if (suggestion) invalid('incomplete-thinking', message);
+    fail(message);
+  }
   const fence = text.match(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/i)
     ?? text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   return fence ? fence[1].trim() : text;
 }
 export function parseSuggestion(content: string, mode: AssistantMode, bookmarkIds: Set<string>, folderIds: Set<string>): { text: string; references: { bookmarkId: string; reason: string }[]; moves: ProposedMove[]; folders: ProposedFolder[]; edits: ProposedEdit[]; deletions: ProposedDeletion[] } {
-  if (!['assist', 'recommend', 'organize'].includes(mode)) fail();
-  if (content.length > 100_000) fail();
+  if (!['assist', 'recommend', 'organize'].includes(mode)) invalid('root-schema');
+  if (content.length > 100_000) invalid('response-limit');
   let parsed: unknown;
-  const json = unwrapResponse(content);
-  try { parsed = JSON.parse(json); } catch { fail('模型没有返回完整、有效的 JSON。请重试；若反复出现，请缩小书签范围或提高输出 token 上限。未保存或执行任何建议。'); }
+  const json = unwrapResponse(content, true);
+  try { parsed = JSON.parse(json); } catch { invalid('invalid-json', '模型没有返回完整、有效的 JSON。请重试；若反复出现，请缩小书签范围或提高输出 token 上限。未保存或执行任何建议。'); }
   // Missing unused lists mean no proposals, never inferred IDs or actions. Explicit null/wrong types still fail.
   if (object(parsed)) {
     for (const field of ['references', 'moves', 'folders', 'edits', 'deletions']) if (!(field in parsed)) parsed[field] = [];
   }
-  if (!object(parsed) || !keys(parsed, ['text', 'references', 'moves', 'folders', 'edits', 'deletions']) || typeof parsed.text !== 'string' || parsed.text.length > 12000 || !Array.isArray(parsed.references) || !Array.isArray(parsed.moves) || parsed.references.length > 30 || parsed.moves.length > 60) fail();
+  if (!object(parsed) || !keys(parsed, ['text', 'references', 'moves', 'folders', 'edits', 'deletions']) || typeof parsed.text !== 'string' || parsed.text.length > 12000 || !Array.isArray(parsed.references) || !Array.isArray(parsed.moves) || parsed.references.length > 30 || parsed.moves.length > 60) invalid('root-schema');
   const references: { bookmarkId: string; reason: string }[] = [];
   const seen = new Set<string>();
   for (const ref of parsed.references) {
-    if (!object(ref) || !keys(ref, ['bookmarkId', 'reason']) || typeof ref.bookmarkId !== 'string' || !bookmarkIds.has(ref.bookmarkId) || seen.has(ref.bookmarkId) || typeof ref.reason !== 'string' || ref.reason.length > 2000) fail();
+    if (!object(ref) || !keys(ref, ['bookmarkId', 'reason']) || typeof ref.bookmarkId !== 'string' || typeof ref.reason !== 'string' || ref.reason.length > 2000) invalid('reference-schema');
+    if (!bookmarkIds.has(ref.bookmarkId)) invalid('reference-id');
+    if (seen.has(ref.bookmarkId)) invalid('duplicate-reference');
     seen.add(ref.bookmarkId); references.push({ bookmarkId: ref.bookmarkId, reason: sanitizeModelText(ref.reason) });
   }
   const proposed = parsed.folders === undefined ? [] : parsed.folders;
-  if (!Array.isArray(proposed) || proposed.length > 10 || (mode === 'recommend' && proposed.length)) fail();
+  if (!Array.isArray(proposed) || proposed.length > 10) invalid('folder-schema');
+  if (mode === 'recommend' && proposed.length) invalid('read-only-action');
   const folders: ProposedFolder[] = [];
   const proposalIds = new Set<string>();
   const folderNames = new Set<string>();
   for (const f of proposed) {
-    if (!object(f) || !keys(f, ['proposalId', 'title', 'parentFolderId']) || typeof f.proposalId !== 'string' || !/^new:[a-zA-Z0-9_-]{1,64}$/.test(f.proposalId) || proposalIds.has(f.proposalId) || folderIds.has(f.proposalId) || typeof f.title !== 'string' || !f.title.trim() || f.title.length > 80 || /[\/\\\p{Cc}\p{Cf}]/u.test(f.title) || typeof f.parentFolderId !== 'string' || !folderIds.has(f.parentFolderId)) fail();
+    if (!object(f) || !keys(f, ['proposalId', 'title', 'parentFolderId']) || typeof f.proposalId !== 'string' || !/^new:[a-zA-Z0-9_-]{1,64}$/.test(f.proposalId) || typeof f.title !== 'string' || !f.title.trim() || f.title.length > 80 || /[\/\\\p{Cc}\p{Cf}]/u.test(f.title) || typeof f.parentFolderId !== 'string') invalid('folder-schema');
+    if (proposalIds.has(f.proposalId)) invalid('duplicate-folder');
+    if (folderIds.has(f.proposalId) || !folderIds.has(f.parentFolderId)) invalid('folder-id');
     const title = f.title.trim();
     const nameKey = JSON.stringify([f.parentFolderId, title.normalize('NFKC').toLocaleLowerCase()]);
-    if (folderNames.has(nameKey)) fail();
+    if (folderNames.has(nameKey)) invalid('duplicate-folder');
     proposalIds.add(f.proposalId); folderNames.add(nameKey);
     folders.push({ proposalId: f.proposalId, title, parentFolderId: f.parentFolderId });
   }
   const moves: ProposedMove[] = []; seen.clear();
   for (const move of parsed.moves) {
-    if (mode === 'recommend' || !object(move) || !keys(move, ['bookmarkId', 'targetFolderId', 'reason']) || typeof move.bookmarkId !== 'string' || !bookmarkIds.has(move.bookmarkId) || seen.has(move.bookmarkId) || typeof move.targetFolderId !== 'string' || (!folderIds.has(move.targetFolderId) && !proposalIds.has(move.targetFolderId)) || typeof move.reason !== 'string' || !move.reason.trim() || move.reason.length > 2000) fail();
+    if (mode === 'recommend') invalid('read-only-action');
+    if (!object(move) || !keys(move, ['bookmarkId', 'targetFolderId', 'reason']) || typeof move.bookmarkId !== 'string' || typeof move.targetFolderId !== 'string' || typeof move.reason !== 'string' || !move.reason.trim() || move.reason.length > 2000) invalid('move-schema');
+    if (!bookmarkIds.has(move.bookmarkId)) invalid('move-bookmark-id');
+    if (seen.has(move.bookmarkId)) invalid('duplicate-action');
+    if (!folderIds.has(move.targetFolderId) && !proposalIds.has(move.targetFolderId)) invalid('move-target-id');
     seen.add(move.bookmarkId); moves.push({ bookmarkId: move.bookmarkId, targetFolderId: move.targetFolderId, reason: sanitizeModelText(move.reason) });
   }
   const edits: ProposedEdit[] = [];
   const deletions: ProposedDeletion[] = [];
-  if (!Array.isArray(parsed.edits) || !Array.isArray(parsed.deletions) || parsed.edits.length > 60 || parsed.deletions.length > 60 || (mode === 'recommend' && (parsed.edits.length || parsed.deletions.length))) fail();
+  if (!Array.isArray(parsed.edits) || !Array.isArray(parsed.deletions) || parsed.edits.length > 60 || parsed.deletions.length > 60) invalid('root-schema');
+  if (mode === 'recommend' && (parsed.edits.length || parsed.deletions.length)) invalid('read-only-action');
   // The same bookmark cannot be moved, renamed, or deleted twice in one response.
   for (const edit of parsed.edits) {
-    if (!object(edit) || !keys(edit, ['bookmarkId', 'title', 'reason']) || typeof edit.bookmarkId !== 'string' || !bookmarkIds.has(edit.bookmarkId) || seen.has(edit.bookmarkId) || typeof edit.title !== 'string' || !edit.title.trim() || edit.title.length > 300 || /[\p{Cc}\p{Cf}]/u.test(edit.title) || typeof edit.reason !== 'string' || !edit.reason.trim() || edit.reason.length > 2000) fail();
+    if (!object(edit) || !keys(edit, ['bookmarkId', 'title', 'reason']) || typeof edit.bookmarkId !== 'string' || typeof edit.title !== 'string' || !edit.title.trim() || edit.title.length > 300 || /[\p{Cc}\p{Cf}]/u.test(edit.title) || typeof edit.reason !== 'string' || !edit.reason.trim() || edit.reason.length > 2000) invalid('edit-schema');
+    if (!bookmarkIds.has(edit.bookmarkId)) invalid('edit-bookmark-id');
+    if (seen.has(edit.bookmarkId)) invalid('duplicate-action');
     const title = sanitizeModelText(edit.title); const reason = sanitizeModelText(edit.reason);
-    if (!title || !reason) fail();
+    if (!title || !reason) invalid('edit-schema');
     seen.add(edit.bookmarkId); edits.push({ bookmarkId: edit.bookmarkId, title, reason });
   }
   for (const deletion of parsed.deletions) {
-    if (!object(deletion) || !keys(deletion, ['bookmarkId', 'reason']) || typeof deletion.bookmarkId !== 'string' || !bookmarkIds.has(deletion.bookmarkId) || seen.has(deletion.bookmarkId) || typeof deletion.reason !== 'string' || !deletion.reason.trim() || deletion.reason.length > 2000) fail();
+    if (!object(deletion) || !keys(deletion, ['bookmarkId', 'reason']) || typeof deletion.bookmarkId !== 'string' || typeof deletion.reason !== 'string' || !deletion.reason.trim() || deletion.reason.length > 2000) invalid('deletion-schema');
+    if (!bookmarkIds.has(deletion.bookmarkId)) invalid('deletion-bookmark-id');
+    if (seen.has(deletion.bookmarkId)) invalid('duplicate-action');
     const reason = sanitizeModelText(deletion.reason);
-    if (!reason) fail();
+    if (!reason) invalid('deletion-schema');
     seen.add(deletion.bookmarkId); deletions.push({ bookmarkId: deletion.bookmarkId, reason });
   }
   const text = sanitizeModelText(parsed.text);
-  if (!text && !references.length && !moves.length && !folders.length && !edits.length && !deletions.length) fail();
+  if (!text && !references.length && !moves.length && !folders.length && !edits.length && !deletions.length) invalid('empty-result');
   return { text, references, moves, folders, edits, deletions };
 }
 /** Search expansion is data for local ranking, never IDs, URLs, scope or executable suggestions. */

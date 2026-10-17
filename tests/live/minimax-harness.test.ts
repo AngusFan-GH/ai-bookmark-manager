@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { LIVE_COMMIT_MESSAGE, liveGate, runLiveAcceptance, safeFailure } from './minimax-acceptance';
+import { LIVE_COMMIT_MESSAGE, liveGate, runLiveAcceptance, safeFailure, safeValidationReason } from './minimax-acceptance';
+import { SuggestionValidationError } from '../../src/domain/assistant/validation';
 import { AssistantError } from '../../src/domain/assistant/types';
 
 const approved = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'AngusFan-GH/ai-bookmark-manager', GITHUB_REF: 'refs/heads/chloe/bookmark-workspace', GITHUB_RUN_ATTEMPT: '1', GITHUB_EVENT_NAME: 'push', LIVE_COMMIT_MESSAGE };
@@ -97,7 +98,7 @@ describe('live acceptance gates and reporting (offline)', () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('OK')).mockResolvedValueOnce(streamedResponse(suggestion({ references: [{ ...reference, bookmarkId: 'invented-id' }] })));
     const report = await runLiveAcceptance('synthetic-key', fetcher);
     expect(report.passed).toBe(false);
-    expect(report.checks.at(-1)).toMatchObject({ phase: 'recommendation', passed: false });
+    expect(report.checks.at(-1)).toMatchObject({ phase: 'recommendation', passed: false, validationReason: 'reference-id' });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
   it('rejects invented organization targets after otherwise valid streamed turns', async () => {
@@ -109,7 +110,7 @@ describe('live acceptance gates and reporting (offline)', () => {
       .mockResolvedValueOnce(streamedResponse(suggestion({ moves: [{ bookmarkId: 'synthetic-cooking', targetFolderId: 'invented-folder', reason: 'Invalid target.' }] })));
     const report = await runLiveAcceptance('synthetic-key', fetcher);
     expect(report.passed).toBe(false);
-    expect(report.checks.at(-1)).toMatchObject({ phase: 'organization', passed: false });
+    expect(report.checks.at(-1)).toMatchObject({ phase: 'organization', passed: false, validationReason: 'move-target-id' });
     expect(fetcher).toHaveBeenCalledTimes(4);
   });
   it('does not clone or buffer the SSE body before forwarding callbacks', async () => {
@@ -137,6 +138,18 @@ describe('live acceptance gates and reporting (offline)', () => {
     expect(report.passed).toBe(false);
     expect(report.calls[1].sseContentType).toBe(false);
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it('only emits known validation reason enums, never exception text or forged values', () => {
+    const known = new SuggestionValidationError('move-target-id');
+    known.message = 'SYNTHETIC_PRIVATE_ERROR_TEXT';
+    expect(safeValidationReason(known)).toBe('move-target-id');
+    const forged = new SuggestionValidationError('move-target-id');
+    Object.assign(forged, { validationReason: 'SYNTHETIC_PRIVATE_REASON' });
+    expect(safeValidationReason(forged)).toBeUndefined();
+    expect(safeValidationReason({ validationReason: 'move-target-id' })).toBeUndefined();
+    expect(safeValidationReason(new AssistantError('validation', 'SYNTHETIC_PRIVATE_ERROR_TEXT'))).toBeUndefined();
+    expect(safeValidationReason(new Error('SYNTHETIC_PRIVATE_ERROR_TEXT'))).toBeUndefined();
+    expect(JSON.stringify({ failure: safeFailure(known), validationReason: safeValidationReason(known) })).not.toContain('SYNTHETIC_PRIVATE');
   });
   it('drops arbitrary error text and nonnumeric token usage', async () => {
     expect(safeFailure(new Error('fake-secret'))).toBe('unexpected');

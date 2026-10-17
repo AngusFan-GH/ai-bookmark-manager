@@ -1,3 +1,4 @@
+import { SUGGESTION_VALIDATION_REASONS, SuggestionValidationError, type SuggestionValidationReason } from '../../src/domain/assistant/validation';
 import { newSseDiagnostics, tapSseDiagnostics, type SseDiagnostics } from './sse-diagnostics';
 import { createMiniMaxProvider, MINIMAX_ENDPOINTS, DEFAULT_MINIMAX_MODEL } from '../../src/domain/assistant/provider';
 import { createAssistantService } from '../../src/domain/assistant/service';
@@ -15,11 +16,14 @@ export function liveGate(env: Record<string, string | undefined>): boolean {
 type Phase = 'connection' | 'recommendation' | 'multi-turn' | 'organization' | 'bookmark-advice';
 type Failure = 'assertion' | 'validation' | 'provider' | 'canceled' | 'timeout' | 'busy' | 'conflict' | 'not-found' | 'limit' | 'unexpected';
 export interface CallMetric { call: number; httpStatus?: number; latencyMs: number; promptTokens?: number; completionTokens?: number; totalTokens?: number; streamRequested: boolean; sseContentType?: boolean; stopValidated?: boolean; previewCallbacks?: number; firstPreviewMs?: number; incrementalPreview?: boolean; sseDiagnostics?: SseDiagnostics }
-export interface LiveReport { schema: 2; provider: 'MiniMax'; region: 'cn'; model: string; maxCalls: number; maxCompletionTokens: number; passed: boolean; checks: { phase: Phase; passed: boolean; failure?: Failure }[]; calls: CallMetric[] }
+export interface LiveReport { schema: 2; provider: 'MiniMax'; region: 'cn'; model: string; maxCalls: number; maxCompletionTokens: number; passed: boolean; checks: { phase: Phase; passed: boolean; failure?: Failure; validationReason?: SuggestionValidationReason }[]; calls: CallMetric[] }
 // Never serialize exception messages, headers, prompts, response bodies, reasoning or keys.
 export function safeFailure(error: unknown): Failure {
   if (error instanceof AssistantError && ['validation', 'provider', 'canceled', 'timeout', 'busy', 'conflict', 'not-found', 'limit'].includes(error.code)) return error.code;
   return error instanceof AcceptanceAssertion ? 'assertion' : 'unexpected';
+}
+export function safeValidationReason(error: unknown): SuggestionValidationReason | undefined {
+  return error instanceof SuggestionValidationError && SUGGESTION_VALIDATION_REASONS.includes(error.validationReason) ? error.validationReason : undefined;
 }
 class AcceptanceAssertion extends Error {}
 function check(value: unknown): asserts value { if (!value) throw new AcceptanceAssertion(); }
@@ -147,6 +151,6 @@ export async function runLiveAcceptance(apiKey: string, fetcher: typeof fetch = 
     report.checks.push({ phase, passed: true });
     check(report.calls.length === MAX_LIVE_CALLS);
     report.passed = true;
-  } catch (error) { report.checks.push({ phase, passed: false, failure: safeFailure(error) }); }
+  } catch (error) { report.checks.push({ phase, passed: false, failure: safeFailure(error), validationReason: safeValidationReason(error) }); }
   return report;
 }

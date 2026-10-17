@@ -38,3 +38,7 @@ The live-only transport tap forwards original SSE byte chunks without cloning, b
 ## Observed MiniMax M2.5 termination compatibility
 
 The bounded diagnostic run observed eight valid SSE frames, one explicit `stop`, clean reader EOF, zero `[DONE]` markers, and no trailing data or read errors. This is protocol evidence for accepting explicit-stop plus clean-EOF termination; it is not a completed five-phase live acceptance result. Offline coverage exercises both termination forms through all five phases, and rejects missing-stop, read-error and incomplete-record variants. A new bounded live run is still required to validate the full recommendation, multi-turn, organization and advice flow after the compatibility change.
+
+## Structured-validation diagnostics
+
+When the actual domain validator rejects a suggestion, the phase report may include `validationReason`, restricted to the validator’s exported fixed enum whitelist. It identifies a failing guard such as an unknown move target or malformed action schema, without exposing the model response, arbitrary property names, IDs, titles, reasons or exception messages. Unknown or forged values are omitted. This adds diagnosis only: final ID/schema validation remains mandatory and unchanged.
