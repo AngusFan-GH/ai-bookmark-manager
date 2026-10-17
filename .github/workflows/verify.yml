@@ -30,6 +30,7 @@ jobs:
       - name: Install isolated native-window test support
         run: sudo apt-get update && sudo apt-get install -y openbox xdotool dbus-x11
       - name: Verify browser workflows and native action popup
+        timeout-minutes: 10
         run: xvfb-run -a dbus-run-session -- bash -c 'openbox > /tmp/bookmark-openbox.log 2>&1 & npm run test:browser'
         env:
           E2E_HEADED: '1'

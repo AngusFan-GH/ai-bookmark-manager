@@ -7,6 +7,7 @@
 import { createRequire } from 'node:module';
 const { chromium } = createRequire(import.meta.url)('playwright');
 import { mkdtemp, cp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -51,7 +52,29 @@ globalThis.fetch = async (url, init) => {
 `;
 await writeFile(background,mock+await readFile(background,'utf8'));
 let context; let page; let worker; const checks=[]; const errors=[];
-const pass = name => { checks.push(name); console.log('PASS',name); };
+let currentStage='launch isolated browser';
+const startedAt=Date.now();
+const report = extra => ({checks,errors,currentStage,elapsedMs:Date.now()-startedAt,syntheticOnly:true,mockProvider:true,liveProviderTested:false,...extra});
+const checkpoint = name => {
+ currentStage=name;console.log('STAGE',name);
+ writeFileSync(path.join(artifactDir,'progress.json'),JSON.stringify(report({status:'running'}),null,2));
+};
+const pass = name => { checks.push(name); console.log('PASS',name); checkpoint('after: '+name); };
+const bounded = async (operation,timeout,label) => {
+ let timer;
+ try {return await Promise.race([operation,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(label+' timed out after '+timeout+'ms')),timeout);})]);}
+ finally {clearTimeout(timer);}
+};
+// This watchdog also covers evaluate(), browser startup and shutdown, which do
+// not inherit Playwright locator timeouts. Persist evidence before terminating.
+const watchdog=setTimeout(()=>{
+ const failure='Browser suite exceeded its 8-minute budget at: '+currentStage;
+ console.error(failure);
+ writeFileSync(path.join(artifactDir,'report.json'),JSON.stringify(report({failure}),null,2));
+ process.exit(1);
+},8*60*1000);
+watchdog.unref();
+checkpoint(currentStage);
 // Assertions poll rendered state rather than forcing controls or relying on sleeps.
 async function eventually(assertion, timeout=10000) {
  const deadline=Date.now()+timeout; let last;
@@ -65,12 +88,13 @@ async function choose(input, checked=true) {
  assert.equal(await input.isChecked(),checked,'Visible label must update native checked state');
 }
 async function screenshot(name) {
+ checkpoint('screenshot: '+name);
  // Capture stable product UI, not the opening modal transition or a fading toast.
- await page.evaluate(async()=>{
+ await bounded(page.evaluate(async()=>{
   await Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished.catch(()=>{})));
- });
+ }),5000,'UI animation stabilization');
  await eventually(async()=>assert.equal(await page.locator('.el-message:visible').count(),0));
- await page.screenshot({path:path.join(artifactDir,name+'.png'),fullPage:true,animations:'disabled'});
+ await page.screenshot({path:path.join(artifactDir,name+'.png'),fullPage:true,animations:'disabled',timeout:10000});
 }
 async function noBodyOverflow(label) {
  const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,width:innerWidth}));
@@ -105,6 +129,9 @@ try {
   // A context default viewport also gets applied to CDP other targets.
   viewport:null,acceptDownloads:true,
  });
+ context.setDefaultTimeout(20000);
+ context.setDefaultNavigationTimeout(30000);
+ checkpoint('load workspace and first-run setup');
  // Even accidental page navigations cannot reach a real website.
  await context.route(/^https?:\/\//,route=>route.request().url().startsWith('https://example.test/')
   ?route.fulfill({status:200,contentType:'text/html',body:'<title>Synthetic capture page</title><p>Synthetic fixture only</p>'}):route.abort());
@@ -119,6 +146,7 @@ try {
   const response = await page.evaluate(data=>chrome.runtime.sendMessage({...data,requestId:crypto.randomUUID()}),{type,...extra});
   assert.equal(response.ok,true,`${type}: ${JSON.stringify(response)}`); return response.data;
  };
+ checkpoint('first-run onboarding');
  // Fresh-profile onboarding must permit a genuinely local-only path.
  const onboarding=page.getByRole('dialog',{name:'欢迎使用 · 连接你的 AI 助手',exact:true});
  await onboarding.waitFor();await screenshot('first-run-onboarding');
@@ -172,6 +200,7 @@ try {
  await search('Synthetic Guide');
  await page.waitForTimeout(1100);assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),0);
  pass('local search after skipped setup remains usable and never calls an unconfigured provider');
+ checkpoint('settings validation and connection');
  // Settings are entered visibly, with model validation, cancellation and explicit local opt-in.
  await page.getByRole('button',{name:'AI 设置',exact:true}).click();
  let settingsDialog=page.getByRole('dialog',{name:'AI 连接与数据范围',exact:true});
@@ -201,6 +230,7 @@ try {
  assert.equal(connectionCalls.length,1);assert.deepEqual(connectionCalls[0].messages,[{role:'user',content:'Reply with OK.'}]);
  assert.equal((await request('ASSISTANT_SETTINGS_GET')).keyStorage,'local');
  pass('settings reopen after skip, validate inline, cancel safely, and test connectivity with a fixed bookmark-free prompt');
+ checkpoint('automatic guidance cancellation and scope');
  // Exercise automatic guidance separately, then isolate the existing manual journeys.
  const configuredSettings=await request('ASSISTANT_SETTINGS_GET');
  const autoCard=page.getByRole('complementary',{name:'自动 AI 建议',exact:true});
@@ -233,6 +263,7 @@ try {
  await request('ASSISTANT_SETTINGS_SAVE',{settings:{...configuredSettings,autoSuggestions:false}});
  await page.reload();await goal().waitFor();
  await worker.evaluate(()=>{globalThis.__mockCalls=[];});
+ checkpoint('two-turn conversation and history');
  // No backend-generated session or turn: the real goal composer creates and sends both turns.
  await goal().fill('Organize Synthetic Guide');await page.getByRole('button',{name:'询问 AI',exact:true}).click();
  await page.getByText('Synthetic answer 1',{exact:true}).waitFor();
@@ -256,10 +287,12 @@ try {
  assert.equal(created.title,'Synthetic AI Folder');assert.equal(created.parentId,ids.target);
  await exportPlan('synthetic-completed-plan-backup.json');await screenshot('workspace-plan-completed');
  pass('AI folder + dependent move visibly review and execute using automatic snapshot; repeat execution blocked; completed backup export works');
+ checkpoint('inverse-plan recovery');
  // Recovery is a real visible inverse-plan review, not a hidden runtime approval.
  await page.getByRole('button',{name:'预览恢复',exact:true}).click();await approve(true);
  assert.equal((await native(id=>chrome.bookmarks.get(id),ids.guide))[0].parentId,ids.nested);
  pass('visible completed-plan recovery preview restores original native bookmark position');
+ checkpoint('duplicate review and deletion');
  // Dedup keeps one copy and never writes during analysis or selection.
  await page.getByRole('button',{name:'检查完全相同的 URL',exact:true}).click();
  const duplicateCard=page.locator('.duplicate-card');await duplicateCard.waitFor();
@@ -277,6 +310,7 @@ try {
  await page.getByRole('button',{name:/整理书签/}).click();assert.equal(await page.locator('.duplicates-section').count(),0);
  await page.getByRole('button',{name:'目录',exact:true}).click();await page.getByRole('button',{name:'▤ 全部书签',exact:true}).click();
  pass('changing directory invalidates previous duplicate results');
+ checkpoint('manual bookmark editor');
  // Ordinary add/edit/move controls also use the exact same safe plan review.
  await page.getByRole('button',{name:/收藏网址/}).click();
  let editor=page.getByRole('dialog',{name:'添加书签',exact:true});
@@ -292,6 +326,7 @@ try {
  await editor.getByRole('button',{name:'预览更改',exact:false}).click();await approve();
  const manual=(await native(()=>chrome.bookmarks.search({title:'Synthetic Manual Edited'})))[0];assert.equal(manual.parentId,ids.target);assert.equal(manual.url,'https://example.test/manual?Keep=YES#frag');
  pass('manual add validation, title editing and destination move execute only after visible review and preserve exact URL');
+ checkpoint('tools and import recovery');
  // Local search and tools have separate state. Import recovery uses the file chooser and visible approval.
  await search('Synthetic Guide');await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();
  await page.getByRole('button',{name:'导入 / 导出',exact:true}).click();
@@ -322,6 +357,7 @@ try {
  assert(restoredNested.children.some(n=>n.title==='Synthetic Guide'&&n.url==='https://example.test/guide?Original=YES#frag'));
  await importDialog.getByRole('button',{name:'关闭',exact:true}).click();await closeDialog(toolsDialog);
  pass('visible same-file import resets to additive, requires review, and restores nested folders with exact leaf URL');
+ checkpoint('link-health rendering');
  // Safe health rendering without running any external scan.
  await native(async root=>{await chrome.bookmarks.create({parentId:root,title:'Synthetic unsafe protocol',url:'javascript:void(0)'});},ids.root);await request('SYNC');
  await page.getByRole('button',{name:'链接健康',exact:true}).click();
@@ -329,6 +365,7 @@ try {
  assert.equal(await toolsDialog.locator('a[href^="javascript:"],a[href^="data:"]').count(),0);
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('health '+width);await reachable(toolsDialog.getByRole('button',{name:'返回工作台',exact:true}),'health close '+width);await screenshot('health-'+width);}
  await closeDialog(toolsDialog);pass('health leaves unsafe schemes nonclickable and fits four viewport sizes');
+ checkpoint('stale conversation protection');
  // Historical candidate IDs were deleted and restored under new IDs. Reusing that
  // conversation must fail before transmitting its stale private history.
  const callsBeforeStaleHistory=await worker.evaluate(()=>globalThis.__mockCalls.length);
@@ -338,6 +375,7 @@ try {
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeStaleHistory);
  await goal().fill('');await page.getByRole('button',{name:'新任务',exact:true}).click();
  pass('stale private conversation history is blocked before provider transmission; visible new-task action starts cleanly');
+ checkpoint('provider failure and cancellation');
  // Provider failures and cancellation retain the user's prompt and allow a later successful retry.
  await worker.evaluate(()=>{globalThis.__mockMode='error';});await goal().fill('Synthetic retry request');
  await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await page.getByText('AI 请求暂时受限，请稍后重试，并检查服务账户的额度与调用频率。',{exact:true}).waitFor();assert.equal(await goal().inputValue(),'Synthetic retry request');
@@ -348,6 +386,7 @@ try {
  assert.equal(await goal().inputValue(),'Synthetic retry request');
  await worker.evaluate(()=>{globalThis.__mockMode='ok';});await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await eventually(async()=>assert.equal(await goal().inputValue(),''));
  pass('visible provider error and cancellation preserve the prompt; retry completes successfully');
+ checkpoint('selected bookmark scope');
  // Selection scope freezes an explicitly selected native bookmark, independently of search text.
  await search('Synthetic Manual Edited');let scopedRow=page.locator('.results-panel tbody tr').filter({hasText:'Synthetic Manual Edited'});
  await choose(scopedRow.getByRole('checkbox'));await goal().fill('');await page.getByRole('button',{name:'AI 整理所选',exact:true}).click();
@@ -360,6 +399,7 @@ try {
  await goal().focus();await page.keyboard.type('Synthetic Guide');await page.getByRole('button',{name:'本地搜索',exact:true}).click();
  await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();await page.keyboard.press('Tab');assert(await page.evaluate(()=>document.activeElement!==document.body));
  pass('workspace responsive screenshots and keyboard-driven local search work');
+ checkpoint('sidepanel responsive rendering');
  // Sidepanel document runs the same full workspace at realistic narrow widths.
  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);await page.getByRole('textbox',{name:'搜索书签或描述你的目标',exact:true}).waitFor();
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('sidepanel '+width);await screenshot('sidepanel-'+width);}
@@ -368,6 +408,7 @@ try {
  // Opening popup.html as a tab cannot reproduce Chrome's activeTab grant. Use the real extension action popup.
  const sourcePage=await context.newPage();await sourcePage.goto('https://example.test/capture?Keep=YES#frag');await sourcePage.bringToFront();
  const openNativePopup=async()=>{
+  checkpoint('open native action popup');
   await sourcePage.bringToFront();
   const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
   if(process.env.E2E_NATIVE_POPUP==='shortcut') await execFileAsync('xdotool',['key','--clearmodifiers','ctrl+shift+y']);
@@ -442,9 +483,25 @@ try {
  pass('native lookup retry recovers inline advice without saving a bookmark');
  pass('failed native capture lookup pauses automatic advice instead of treating unknown status as a new bookmark');
  assert.deepEqual(errors,[]);pass('no uncaught workspace page errors');
- await writeFile(path.join(artifactDir,'report.json'),JSON.stringify({checks,errors,syntheticOnly:true,mockProvider:true,liveProviderTested:false},null,2));
+ await writeFile(path.join(artifactDir,'report.json'),JSON.stringify(report({status:'passed'}),null,2));
  console.log(`Artifacts: ${artifactDir}`);
 } catch(error) {
- if(page){await page.screenshot({path:path.join(artifactDir,'failure.png'),fullPage:true}).catch(()=>{});console.error((await page.locator('body').innerText().catch(()=>'' )).slice(0,6000));}
- await writeFile(path.join(artifactDir,'report.json'),JSON.stringify({checks,errors,failure:String(error),syntheticOnly:true,mockProvider:true},null,2));throw error;
-} finally {if(context)await context.close();await rm(temp,{recursive:true,force:true});}
+ // Save the assertion failure before asking a possibly unhealthy browser for
+ // diagnostics. Neither screenshot capture nor cleanup may swallow this report.
+ await writeFile(path.join(artifactDir,'report.json'),JSON.stringify(report({failure:String(error)}),null,2));
+ if(page){
+  await bounded(page.screenshot({path:path.join(artifactDir,'failure.png'),fullPage:true,timeout:5000}),6000,'failure screenshot').catch(diagnostic=>console.error(String(diagnostic)));
+  console.error((await page.locator('body').innerText({timeout:5000}).catch(()=>'' )).slice(0,6000));
+ }
+ throw error;
+} finally {
+ try {
+  if(context)await bounded(context.close(),10000,'isolated browser cleanup');
+  await bounded(rm(temp,{recursive:true,force:true}),5000,'temporary profile cleanup');
+ } catch(cleanupError) {
+  console.error(String(cleanupError));
+  writeFileSync(path.join(artifactDir,'cleanup-error.json'),JSON.stringify(report({failure:String(cleanupError)}),null,2));
+  // Unclosed Chromium transports can otherwise keep Node alive indefinitely.
+  process.exitCode=1;setTimeout(()=>process.exit(1),1000).unref();
+ } finally {clearTimeout(watchdog);}
+}
