@@ -6,7 +6,7 @@ A local-first, task-oriented bookmark assistant for Chrome. Native browser bookm
 
 - One goal/search surface; optional directory and history drawers rather than a permanent three-column admin screen.
 - Direct bookmark/folder creation, editing, movement and reviewed deletion. Changing a title and moving the same bookmark is supported as an ordered operation.
-- Popup current-page save, exact-URL local search and optional AI advice; a sidepanel reuses the workspace.
+- Popup current-page save, exact-URL local search and opt-in automatic AI advice; a sidepanel reuses the workspace.
 - Unified multi-turn AI tasks with explicit folder, query or selected-bookmark scope. Original URLs come from stored records, not model prose.
 - Exact-URL duplicate review, selected link rechecks, and safe removal previews.
 - Durable automatic snapshots before writes, optional external export, and separately reviewed targeted recovery with conflict checks.
@@ -36,9 +36,11 @@ For development use `npm run dev`. WXT starts a temporary profile; keep that iso
 
 ## MiniMax configuration
 
-Choose China (`api.minimax.cn`) or global (`api.minimax.io`), a model supported by your account, and enter your own key **in the extension**, never in source, issue text or chat. Saving a key does not prove model connectivity. The default is `MiniMax-M2.5`; output budget is configurable from 1024 to 16384 tokens.
+Choose China (`api.minimax.cn`) or global (`api.minimax.io`), a model supported by your account, and enter your own key **in the extension**, never in source, issue text or chat. First-run setup can be skipped to keep using local features. “保存并测试连接” checks the chosen account/model with a fixed prompt containing no bookmarks. Automatic suggestions require a successful test, metadata-sharing consent and the separate “自动提供 AI 建议” opt-in. Changing the key, region or model requires a new test. The default is `MiniMax-M2.5`; output budget is configurable from 1024 to 16384 tokens.
 
 Keys default to browser-session storage. Explicit "在此设备记住密钥" uses extension-local storage, not sync storage; it is not an encrypted credential vault. Region changes or clearing remove both copies. No shared service key is bundled.
+
+With automatic suggestions enabled, the popup offers title/folder advice after its draft settles, explicit local search can show related references, and entering organization can suggest changes for a bounded current selection or visible set. Typing alone does not send workspace searches. Suggestions never overwrite the capture draft or write bookmarks automatically: use “采用建议”, then confirm capture, or review a workspace change plan. Requests may consume provider credits; switching off automatic suggestions leaves local features available.
 
 Tests use synthetic bookmarks and mocked provider responses. Live model availability, real response quality, account billing and native permission-dialog UX remain separate manual acceptance items.
 

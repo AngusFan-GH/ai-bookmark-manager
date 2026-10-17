@@ -169,8 +169,9 @@ export default defineBackground(() => {
   });
 
   // Initial sync on install/startup.
-  chrome.runtime.onInstalled.addListener(() => {
+  chrome.runtime.onInstalled.addListener((details) => {
     debouncer.schedule('startup');
+    if(details.reason === 'install') void chrome.tabs.create({url:chrome.runtime.getURL('options.html#onboarding')}).catch(()=>{/* First-use UI also offers the guide if opening a tab fails. */});
   });
   chrome.runtime.onStartup.addListener(() => {
     debouncer.schedule('startup');

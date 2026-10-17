@@ -21,7 +21,9 @@ Pregranting avoids the native permissions dialog; the suite does **not** prove t
 ## Assertions
 
 - Built MV3 workspace and native nested/empty folders synchronize to actual IndexedDB.
+- Fresh-profile onboarding can be skipped and stays dismissed after reload without provider requests. Settings can be reopened; connectivity testing sends a fixed prompt with no bookmark data.
 - Visible settings reject an empty model inline; cancel does not save; explicit remember-key choice is persisted.
+- Explicit local search can show automatic references without replacing its local result table; organization suggests only the bounded visible scope and does not write bookmarks. Automatic requests can be canceled or invalidated by changed search, and a tested key without consent does not transmit data.
 - Two visible composer turns retain provider context, exact URL and stable citation; history is reopened after reload.
 - AI folder creation/dependent move requires readable plan, automatic snapshot and explicit review; repeated execution is unavailable. Backup export works before and after execution, without the synthetic key.
 - Visible recovery generates and executes a separately reviewed inverse plan.
@@ -33,6 +35,7 @@ Pregranting avoids the native permissions dialog; the suite does **not** prove t
 - Mocked 429 and aborted provider requests retain the draft; retry succeeds.
 - AI selection scope transmits exactly one explicitly selected bookmark.
 - Workspace/import/health/sidepanel screenshots at 390, 768, 1024 and 1440 px assert no document-level horizontal overflow. Keyboard local search is exercised.
+- Opted-in popup advice appears automatically but does not overwrite title/folder fields or save. Explicitly applying advice changes the draft only.
 - The actual extension action popup is opened with a browser action keyboard shortcut under CI; active synthetic page quick-save and local popup search are exercised.
 - Uncaught workspace/popup errors fail the run.
 

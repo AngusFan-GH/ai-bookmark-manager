@@ -48,6 +48,7 @@ export function scopedBookmarks<T extends {parentId:string|null}>(bookmarks:T[],
   return bookmarks.filter(b => b.parentId && ids.has(b.parentId));
 }
 export function validateSettings(input:SettingsInput):void {
+  for(const key of ['autoSuggestions','onboardingCompleted'] as const) if(input?.[key] !== undefined && typeof input[key] !== 'boolean') throw new Error('引导和自动建议设置无效');
   if (!input || !['cn','global'].includes(input.region) || typeof input.model !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(input.model) || typeof input.consent !== 'boolean') throw new Error('模型设置无效');
   if(input.keyStorage !== undefined && !['session','local'].includes(input.keyStorage)) throw new Error('密钥保存方式无效');
   if(input.excludedFolderIds !== undefined && (!Array.isArray(input.excludedFolderIds)||input.excludedFolderIds.length>500||input.excludedFolderIds.some(id=>typeof id!=='string'||!id||id.length>200))) throw new Error('排除目录设置无效');
@@ -62,7 +63,12 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     async listBookmarks(){const [rows,folders,settings]=await Promise.all([repository.listBookmarks(),repository.listFolders(),readSettings()]);const excluded=excludedFolderSet(folders,settings.excludedFolderIds);return rows.filter(b=>!!b.url&&safeForAssistant(b.url)&&(!b.parentId||!excluded.has(b.parentId)));},
     async listFolders(){const [folders,settings]=await Promise.all([repository.listFolders(),readSettings()]);const excluded=excludedFolderSet(folders,settings.excludedFolderIds);return folders.filter(f=>!excluded.has(f.id));}
   };
-  const service=createAssistantService({repository:outboundRepository,provider:createMiniMaxProvider()});
+  const provider=createMiniMaxProvider();
+  const service=createAssistantService({repository:outboundRepository,provider});
+  // Construct lazily so existing manual service state remains independent.
+  const automaticService=() => createAssistantService({repository:{...outboundRepository,
+    async listBookmarks(){return (await outboundRepository.listBookmarks()).map(({contentSnippet:_snippet,...metadata})=>metadata);}
+  },provider});
   const controllers=new Map<string,AbortController>();
   let settingsMutation=false;
   let keyAccessBlocked=false;
@@ -80,8 +86,9 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     return area;
   };
   const readSettings=async () => {
-    const stored=(await db.meta.get(SETTINGS_KEY))?.value as Partial<AssistantSettingsView>|undefined;
-    return {region:stored?.region === 'global' ? 'global' as const : 'cn' as const,
+    const stored=(await db.meta.get(SETTINGS_KEY))?.value as (Partial<AssistantSettingsView>&{configRevision?:string;testedRevision?:string})|undefined;
+    return {autoSuggestions:stored?.autoSuggestions===true,onboardingCompleted:stored?.onboardingCompleted??!!stored,
+      configRevision:stored?.configRevision??'',testedRevision:stored?.testedRevision??'',region:stored?.region === 'global' ? 'global' as const : 'cn' as const,
       model:stored?.model ?? DEFAULT_SETTINGS.model,consent:stored?.consent === true,
       keyStorage:stored?.keyStorage === 'local' ? 'local' as const : 'session' as const,
       excludedFolderIds:Array.isArray(stored?.excludedFolderIds)?stored.excludedFolderIds:[],contentEnhancement:stored?.contentEnhancement===true,maxCompletionTokens:stored?.maxCompletionTokens??4096};
@@ -105,11 +112,45 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     }));
     if(results.some(result=>result.status === 'rejected')) throw new Error('无法完整清除密钥，请检查浏览器存储后重试');
   };
+  const viewSettings=async ():Promise<AssistantSettingsView> => {
+    const {configRevision,testedRevision,...settings}=await readSettings();
+    const hasKey=!!await readKey({...settings,configRevision,testedRevision});
+    return {...settings,hasKey,connectionTested:hasKey&&!!configRevision&&configRevision===testedRevision};
+  };
+  const assertAutomatic=(settings:Awaited<ReturnType<typeof readSettings>>) => {
+    if(!settings.consent||!settings.autoSuggestions||!settings.configRevision||settings.configRevision!==settings.testedRevision)
+      throw new Error('自动建议需要同意数据发送、启用自动建议并测试当前连接');
+  };
   router.register('ASSISTANT_SETTINGS_GET',async ():Promise<AssistantSettingsView> => {
     if(settingsMutation) throw new Error('模型设置正在更新，请稍后重试');
-    const settings=await readSettings();
-    return {...settings,hasKey:!!await readKey(settings)};
+    return viewSettings();
   })
+    .register('ASSISTANT_ONBOARDING_COMPLETE',async () => {
+      if(settingsMutation||controllers.size)throw new Error('模型设置正在更新，请稍后重试');
+      settingsMutation=true;
+      try {const settings=await readSettings();await db.meta.put({key:SETTINGS_KEY,value:{...settings,onboardingCompleted:true},updatedAt:Date.now()});}
+      finally {settingsMutation=false;}
+    })
+    .register('ASSISTANT_TEST_CONNECTION',async () => {
+      if(settingsMutation||controllers.size)throw new Error('请先停止正在进行的 AI 请求，再测试连接');
+      const controller=new AbortController();controllers.set('connection-test',controller);
+      const timeout=setTimeout(()=>controller.abort(),30000);
+      try {
+        const settings=await readSettings();
+        const apiKey=await readKey(settings);if(!apiKey)throw new Error('请先保存 MiniMax API Key');
+        const endpoint=settings.region==='cn'?'https://api.minimax.cn/v1/chat/completions':'https://api.minimax.io/v1/chat/completions';
+        if(!await canFetch(endpoint))throw new Error('请先授予所选 MiniMax 服务的访问权限');
+        if(controller.signal.aborted)throw new Error('连接测试已取消');
+        await db.meta.put({key:SETTINGS_KEY,value:{...settings,testedRevision:''},updatedAt:Date.now()});
+        if(controller.signal.aborted)throw new Error('连接测试已取消');
+        // Explicit test sends only this fixed prompt. No bookmarks, URLs or history.
+        await provider.complete({messages:[{role:'user',content:'Reply with OK.'}],settings:{...settings,maxCompletionTokens:256},apiKey,signal:controller.signal});
+        if(controller.signal.aborted)throw new Error('连接测试已取消');
+        const configRevision=settings.configRevision||crypto.randomUUID();
+        await db.meta.put({key:SETTINGS_KEY,value:{...settings,configRevision,testedRevision:configRevision},updatedAt:Date.now()});
+        return await viewSettings();
+      } finally {clearTimeout(timeout);controllers.delete('connection-test');}
+    })
     .register('ASSISTANT_SETTINGS_SAVE',async req => {
       validateSettings(req.settings);
       if(settingsMutation) throw new Error('模型设置正在更新，请稍后重试');
@@ -133,7 +174,12 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
         const contentEnhancement=req.settings.contentEnhancement??previous.contentEnhancement;
         const maxCompletionTokens=req.settings.maxCompletionTokens??previous.maxCompletionTokens;
         if(JSON.stringify([...excludedFolderIds].sort())!==JSON.stringify([...previous.excludedFolderIds].sort()))await db.meta.put({key:'assistant:privacyUpdatedAt',value:Date.now(),updatedAt:Date.now()});
-        await db.meta.put({key:SETTINGS_KEY,value:{region,model,consent,keyStorage,excludedFolderIds,contentEnhancement,maxCompletionTokens},updatedAt:Date.now()});
+        const configChanged=changingKey||previous.model!==model||previous.maxCompletionTokens!==maxCompletionTokens;
+        const configRevision=configChanged?crypto.randomUUID():previous.configRevision;
+        const testedRevision=configChanged?'':previous.testedRevision;
+        const autoSuggestions=req.settings.autoSuggestions??previous.autoSuggestions;
+        const onboardingCompleted=req.settings.onboardingCompleted??previous.onboardingCompleted;
+        await db.meta.put({key:SETTINGS_KEY,value:{region,model,consent,keyStorage,excludedFolderIds,contentEnhancement,maxCompletionTokens,autoSuggestions,onboardingCompleted,configRevision,testedRevision},updatedAt:Date.now()});
         if(changingKey) keyAccessBlocked=false;
       } catch {
         if(changingKey) {
@@ -149,6 +195,7 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
       try {
         for(const controller of controllers.values()) controller.abort();
         await clearKeys();
+        const settings=await readSettings();await db.meta.put({key:SETTINGS_KEY,value:{...settings,configRevision:crypto.randomUUID(),testedRevision:''},updatedAt:Date.now()});
         keyAccessBlocked=false;
       } catch {
         keyAccessBlocked=true;
@@ -167,9 +214,11 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
       const controller=new AbortController();controllers.set(req.sessionId,controller);
       try {
         const settings=await readSettings();
+        if(req.automatic)assertAutomatic(settings);
         if(typeof req.text!=='string'||!req.text.trim()||req.text.length>8000)throw new Error('请输入 1–8000 字的消息');
         assertSafePromptUrls(req.text);
         const currentSession=await repository.getSession(req.sessionId);
+        if(req.automatic && currentSession?.providerHistory?.length)throw new Error('自动建议必须使用新的对话');
         const privacyTime=(await db.meta.get('assistant:privacyUpdatedAt'))?.value as number|undefined;
         if(currentSession && ((privacyTime&&currentSession.createdAt<=privacyTime)||currentSession.citations.some(c=>!safeForAssistant(c.url))))throw new Error('隐私排除范围已变化，请开始新任务，避免重新发送旧对话中的资料。');
         if(currentSession?.providerHistory?.length && !historySafeForAssistant(currentSession.providerHistory,await outboundRepository.listBookmarks(),await outboundRepository.listFolders()))throw new Error('部分历史资料已被排除、移动或修改。请开始新任务，避免重新发送旧资料。');
@@ -179,7 +228,7 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
         const endpoint=settings.region === 'cn'?'https://api.minimax.cn/v1/chat/completions':'https://api.minimax.io/v1/chat/completions';
         if(!await canFetch(endpoint)) throw new Error('尚未授予所选 MiniMax 服务的访问权限，请在设置中授权');
         if(controller.signal.aborted) throw new Error('请求已停止');
-        if(settings.contentEnhancement && currentSession) {
+        if(!req.automatic && settings.contentEnhancement && currentSession) {
           const [all,folders]=await Promise.all([outboundRepository.listBookmarks(),outboundRepository.listFolders()]);
           const scope=currentSession.scope;const terms=retrievalTerms(req.text);
           const candidates=scopedBookmarks(all,folders,scope.folderId)
@@ -195,7 +244,7 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
           }));
         }
         if(controller.signal.aborted)throw new Error('请求已取消');
-        return sessionView(await service.turn({sessionId:req.sessionId,text:req.text,settings,apiKey,signal:controller.signal}));
+        return sessionView(await (req.automatic?automaticService():service).turn({sessionId:req.sessionId,text:req.text,settings,apiKey,signal:controller.signal}));
       } finally {if(controllers.get(req.sessionId)===controller) controllers.delete(req.sessionId);}
     })
     .register('ASSISTANT_CANCEL',async req => {controllers.get(req.sessionId)?.abort();})
@@ -223,8 +272,8 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     })
     .register('ASSISTANT_ADVISE_BOOKMARK',async req=>{
       if(settingsMutation)throw new Error('模型设置正在更新，请稍后重试');
-      const key='advice:'+req.requestId;const controller=new AbortController();controllers.set(key,controller);
-      try {const settings=await readSettings();if(!settings.consent)throw new Error('请先确认向 MiniMax 发送页面标题和地址');
+      const key='advice:'+req.requestId;if(controllers.has(key))throw new Error('该建议正在生成');const controller=new AbortController();controllers.set(key,controller);
+      try {const settings=await readSettings();if(req.automatic)assertAutomatic(settings);if(!settings.consent)throw new Error('请先确认向 MiniMax 发送页面标题和地址');
       if(!req.input||typeof req.input.url!=='string'||!safeForAssistant(req.input.url))throw new Error('此地址不适合发送给模型，请直接手动保存');
       const apiKey=await readKey(settings);if(!apiKey)throw new Error('请先配置 MiniMax 密钥');
       const endpoint=settings.region==='cn'?'https://api.minimax.cn/v1/chat/completions':'https://api.minimax.io/v1/chat/completions';
@@ -233,6 +282,7 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
       return await service.adviseBookmark({...req.input,settings,apiKey,signal:controller.signal});
       }finally{controllers.delete(key);}
     })
+    .register('ASSISTANT_ADVICE_CANCEL',async req=>{controllers.get('advice:'+req.adviceRequestId)?.abort();})
     .register('CONTENT_STATUS',async req=>{
       if(!Array.isArray(req.bookmarkIds)||req.bookmarkIds.length>200)throw new Error('每次最多查询 200 项');
       const results=[];for(const id of req.bookmarkIds){const [row,cached]=await Promise.all([db.bookmarks.get(id),db.meta.get(CONTENT_PREFIX+id)]);const value=cached?.value as {originalUrl?:string;status?:string;reason?:string}|undefined;results.push({bookmarkId:id,status:!value?'unchecked':value.originalUrl!==row?.url?'outdated':value.status??'unavailable',reason:value?.reason});}return {results};

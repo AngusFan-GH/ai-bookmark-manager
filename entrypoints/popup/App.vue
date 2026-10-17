@@ -21,7 +21,17 @@ const loading = ref(true);
 const busy = ref(false);
 const saved = ref(false);
 const executionAttempted = ref(false);
-const advice = ref('');
+const advice = ref<workspace.BookmarkAdvice>();
+const adviceError = ref('');
+const settings = ref<workspace.AssistantSettingsView>();
+const autoEnabled = computed(() => !!(settings.value?.hasKey && settings.value.consent && settings.value.autoSuggestions && settings.value.connectionTested));
+const suggestedFolder = computed(() => folders.value.find(folder => folder.browserId === advice.value?.targetFolderId || folder.id === advice.value?.targetFolderId));
+let adviceSequence = 0;
+let adviceTimer: ReturnType<typeof setTimeout> | undefined;
+let activeAdviceId: string | undefined;
+const automaticRequests = ref(0);
+const requestedContexts = new Set<string>();
+const contextKey = computed(() => JSON.stringify([title.value, url.value, parentId.value]));
 const suggesting = ref(false);
 const canSave = computed(() => isWebUrl(url.value) && !!title.value.trim() && !!parentId.value && !loading.value && !busy.value && !saved.value && !executionAttempted.value);
 const id = () => crypto.randomUUID();
@@ -29,6 +39,7 @@ let sequence = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
 
 onMounted(async () => {
+  void workspace.getAssistantSettings().then(value => { settings.value = value; }).catch(() => { /* Local capture remains available. */ });
   try {
     const [tabs, tree] = await Promise.all([
       chrome.tabs.query({ active: true, currentWindow: true }),
@@ -58,7 +69,7 @@ watch(query, () => {
     finally { if (current === sequence) searching.value = false; }
   }, 160);
 });
-onBeforeUnmount(() => { ++sequence; clearTimeout(timer); });
+onBeforeUnmount(() => { ++sequence; clearTimeout(timer); invalidateAdvice(); });
 async function openWorkspace() {
   try { await chrome.tabs.create({ url: chrome.runtime.getURL(workspacePath(query.value)) }); }
   catch (e) { error.value = message(e); }
@@ -71,6 +82,7 @@ async function editInWorkspace() {
 }
 async function save() {
   if (!canSave.value) return;
+  invalidateAdvice();
   busy.value = true; error.value = '';
   try {
     const plan = await workspace.prepareOrganization({ title: '收藏当前页面', steps: [{ action: 'create', parentBrowserId: parentId.value, desiredAfter: { title: title.value.trim(), url: url.value }, reason: '用户在快捷收藏中确认标题、原始网址和文件夹' }] });
@@ -83,15 +95,47 @@ async function save() {
   } catch (e) { error.value = message(e); }
   finally { busy.value = false; }
 }
+function invalidateAdvice() {
+  ++adviceSequence;
+  clearTimeout(adviceTimer);
+  if (activeAdviceId) void workspace.cancelAdvice(activeAdviceId).catch(() => {});
+  activeAdviceId = undefined;
+  suggesting.value = false;
+  advice.value = undefined;
+  adviceError.value = '';
+}
+watch([contextKey, autoEnabled, loading, busy, saved], () => {
+  invalidateAdvice();
+  if (!autoEnabled.value || loading.value || busy.value || saved.value || executionAttempted.value || !isWebUrl(url.value) || !title.value.trim() || !parentId.value) return;
+  const context = contextKey.value;
+  if (requestedContexts.has(context) || automaticRequests.value >= 3) return;
+  adviceTimer = setTimeout(() => { void suggest(); }, 800);
+});
 async function suggest() {
-  suggesting.value = true; error.value = ''; advice.value = '';
+  if (!autoEnabled.value || busy.value || saved.value || executionAttempted.value) return;
+  invalidateAdvice();
+  const current = adviceSequence;
+  const requestId = id();
+  activeAdviceId = requestId;
+  requestedContexts.add(contextKey.value);
+  automaticRequests.value++;
+  suggesting.value = true;
   try {
-    const result = await workspace.adviseBookmark({ title: title.value, url: url.value, parentFolderId: parentId.value });
-    if (result.title) title.value = result.title;
-    if (folders.value.some(folder => folder.browserId === result.targetFolderId)) parentId.value = result.targetFolderId;
-    advice.value = result.reason;
-  } catch (e) { error.value = message(e); }
-  finally { suggesting.value = false; }
+    const result = await workspace.adviseBookmark({ title: title.value, url: url.value, parentFolderId: parentId.value }, { automatic: true, requestId });
+    if (current === adviceSequence) advice.value = result;
+  } catch (e) { if (current === adviceSequence) adviceError.value = message(e); }
+  finally { if (current === adviceSequence) { suggesting.value = false; activeAdviceId = undefined; } }
+}
+function applyAdvice() {
+  if (!advice.value?.title.trim() || !suggestedFolder.value || busy.value || saved.value) return;
+  title.value = advice.value.title.trim();
+  parentId.value = suggestedFolder.value.browserId;
+  requestedContexts.add(contextKey.value);
+  invalidateAdvice();
+}
+async function openSettings() {
+  try { await chrome.tabs.create({ url: chrome.runtime.getURL('options.html?settings=ai') }); }
+  catch (e) { error.value = message(e); }
 }
 function openSidepanel() {
   if (windowId.value === undefined) return;
@@ -122,14 +166,17 @@ async function openBookmark(bookmark: BookmarkRecord) {
       <p v-if="loading" class="muted">正在读取当前页面…</p>
       <p v-else-if="!url" class="muted">这个页面无法快捷收藏。请在普通网页中打开扩展。</p>
       <template v-else>
-        <label for="capture-title">标题</label><input id="capture-title" v-model="title" :disabled="busy || saved || suggesting" maxlength="500">
+        <label for="capture-title">标题</label><input id="capture-title" v-model="title" :disabled="busy || saved" maxlength="500">
         <p class="url" :title="url">{{ url }}</p>
-        <label for="capture-folder">保存到</label><select id="capture-folder" v-model="parentId" :disabled="busy || saved || suggesting"><option v-for="folder in folders" :key="folder.browserId" :value="folder.browserId">{{ folder.path || folder.title || '未命名文件夹' }}</option></select>
+        <label for="capture-folder">保存到</label><select id="capture-folder" v-model="parentId" :disabled="busy || saved"><option v-for="folder in folders" :key="folder.browserId" :value="folder.browserId">{{ folder.path || folder.title || '未命名文件夹' }}</option></select>
         <p v-if="!folders.length" class="muted">暂无可用文件夹，请先打开工作台同步书签。</p>
-        <div class="ai-row"><button class="text-button" :disabled="busy || saved || suggesting" @click="suggest">{{ suggesting ? 'AI 正在建议…' : '✦ AI 建议标题和位置' }}</button><button class="text-button" :disabled="busy || suggesting" @click="editInWorkspace">更多编辑</button></div>
-        <p class="privacy">AI 仅在点击后使用；需先在工作台启用并确认信息发送。</p>
-        <p v-if="advice" class="advice">{{ advice }}</p>
-        <button class="primary" :disabled="!canSave || suggesting" @click="save">{{ saved ? '✓ 已收藏' : busy ? '正在安全保存…' : executionAttempted ? '请到工作台核对结果' : '确认收藏' }}</button>
+        <div class="ai-row"><span class="privacy">{{ suggesting ? 'AI 正在自动建议…' : autoEnabled ? '已启用自动建议' : '本地收藏随时可用' }}</span><button class="text-button" :disabled="busy" @click="editInWorkspace">更多编辑</button></div>
+        <p v-if="!autoEnabled" class="privacy">配置并测试 AI、同意元数据发送后，可开启自动标题和目录建议。<button class="text-button" @click="openSettings">设置 AI</button></p>
+        <p v-else class="privacy">仅发送标题、网址和目录信息；建议不会自动写入书签。</p>
+        <div v-if="advice" class="advice" aria-live="polite"><strong>{{ advice.title }}</strong><p>{{ suggestedFolder?.path || suggestedFolder?.title || '建议目录已不可用' }}</p><p>{{ advice.reason }}</p><button class="text-button" :disabled="!suggestedFolder || !advice.title.trim() || busy || saved" @click="applyAdvice">采用建议</button></div>
+        <p v-if="autoEnabled && automaticRequests >= 3 && !advice && !suggesting && !adviceError" class="privacy">本次自动建议次数已用完，仍可直接确认收藏。</p>
+        <p v-if="adviceError" class="error" role="alert">AI 建议暂不可用：{{ adviceError }} <button class="text-button" :disabled="busy || saved" @click="suggest">重试建议</button></p>
+        <button class="primary" :disabled="!canSave" @click="save">{{ saved ? '✓ 已收藏' : busy ? '正在安全保存…' : executionAttempted ? '请到工作台核对结果' : '确认收藏' }}</button>
         <p class="privacy">确认后写入浏览器书签，并自动保留操作前快照。</p>
       </template>
     </section>

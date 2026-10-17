@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import type { InputInstance, SelectInstance } from 'element-plus';
-import { CollectionTag, EditPen, FolderAdd, FolderOpened, ArrowRight, MagicStick } from '@element-plus/icons-vue';
+import { CollectionTag, EditPen, FolderAdd, FolderOpened, ArrowRight } from '@element-plus/icons-vue';
 import type { BookmarkRecord, FolderRecord } from '../../../src/domain/bookmarks/types';
 import type { OrganizationInput } from '../../../src/workspace-client';
 import { buildBookmarkEditorInput, editorDestinationFolders, initialBookmarkEditorDraft, isEditorWebUrl, type BookmarkEditorErrors, type BookmarkEditorKind } from './bookmark-editor-helpers';
@@ -17,13 +17,16 @@ const props = defineProps<{
   advice?: { title: string; targetFolderId: string; reason: string };
   requestingAdvice?: boolean;
   aiAvailable?: boolean;
+  autoEnabled?: boolean;
+  adviceError?: string;
   serverError?: string;
 }>();
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
   prepare: [input: { title: string; steps: OrganizationInput['steps'] }];
   'request-advice': [input: { title: string; url: string; parentFolderId?: string }];
-  'configure-ai': [];
+  'open-settings': [];
+  'cancel-advice': [];
 }>();
 const draft = reactive({ title: '', url: '', parentId: '' });
 const errors = ref<BookmarkEditorErrors>({});
@@ -36,7 +39,10 @@ const draftKey = computed(() => JSON.stringify([draft.title, draft.url, draft.pa
 const visibleAdvice = computed(() => props.advice && adviceDraftKey.value === draftKey.value ? props.advice : undefined);
 const suggestedFolder = computed(() => props.folders.find(folder => folder.id === visibleAdvice.value?.targetFolderId || folder.browserId === visibleAdvice.value?.targetFolderId));
 const canUseAdvice = computed(() => !!visibleAdvice.value?.title?.trim() && !!destinations.value.find(folder => folder.id === suggestedFolder.value?.id));
-const pending = computed(() => props.busy || submitting.value || !!props.requestingAdvice);
+const pending = computed(() => props.busy || submitting.value);
+let adviceTimer: ReturnType<typeof setTimeout> | undefined;
+const automaticRequests = ref(0);
+const requestedContexts = new Set<string>();
 const target = computed(() => props.records[0]);
 const selectionCount = computed(() => new Set(props.records.map(record => record.browserId)).size);
 const editingFolder = computed(() => props.kind === 'edit' && target.value?.kind === 'folder');
@@ -63,29 +69,40 @@ function reset() {
   errors.value = {};
   submitting.value = false;
   adviceDraftKey.value = '';
+  automaticRequests.value = 0;
+  requestedContexts.clear();
 }
 watch(() => [props.modelValue, props.kind] as const, ([open]) => { if (open) reset(); }, { immediate: true });
 watch(() => props.busy, (busy, previous) => { if (previous && !busy) submitting.value = false; });
 function clearError(field: keyof BookmarkEditorErrors) {
   errors.value = { ...errors.value, [field]: undefined, form: undefined };
 }
-function close() { if (!pending.value) emit('update:modelValue', false); }
+function close() { if (!pending.value) { invalidateAdvice(); emit('update:modelValue', false); } }
 function updateOpen(open: boolean) { if (!open) close(); }
 async function focusFirstField() {
   await nextTick();
   if (props.kind === 'move') destinationInput.value?.focus();
   else titleInput.value?.focus();
 }
+function invalidateAdvice() {
+  clearTimeout(adviceTimer);
+  adviceDraftKey.value = '';
+  emit('cancel-advice');
+}
+watch([draftKey, () => props.modelValue, () => props.autoEnabled, pending], () => {
+  invalidateAdvice();
+  if (!props.modelValue || props.kind !== 'bookmark' || !props.autoEnabled || pending.value || !draft.title.trim() || !isEditorWebUrl(draft.url.trim()) || !destination.value) return;
+  if (requestedContexts.has(draftKey.value) || automaticRequests.value >= 3) return;
+  adviceTimer = setTimeout(requestAdvice, 800);
+}, { immediate: true });
+onBeforeUnmount(invalidateAdvice);
 function requestAdvice() {
-  if (pending.value || props.requestingAdvice) return;
-  if (!props.aiAvailable) { emit('configure-ai'); return; }
-  const next: BookmarkEditorErrors = {};
-  if (!draft.title.trim()) next.title = '请输入书签标题后再获取建议。';
-  if (!isEditorWebUrl(draft.url.trim())) next.url = '请输入完整的 http:// 或 https:// 网页地址。';
-  errors.value = next;
-  if (Object.keys(next).length) return;
+  if (pending.value || !props.modelValue || !props.autoEnabled || !draft.title.trim() || !isEditorWebUrl(draft.url.trim()) || !destination.value) return;
+  invalidateAdvice();
   adviceDraftKey.value = draftKey.value;
-  emit('request-advice', { title: draft.title.trim(), url: draft.url.trim(), ...(destination.value ? { parentFolderId: destination.value.browserId } : {}) });
+  requestedContexts.add(draftKey.value);
+  automaticRequests.value++;
+  emit('request-advice', { title: draft.title.trim(), url: draft.url.trim(), parentFolderId: destination.value.browserId });
 }
 function useAdvice() {
   if (!visibleAdvice.value || !suggestedFolder.value || !canUseAdvice.value || pending.value) return;
@@ -94,7 +111,8 @@ function useAdvice() {
   draft.title = title;
   draft.parentId = parentId;
   errors.value = {};
-  adviceDraftKey.value = '';
+  requestedContexts.add(draftKey.value);
+  invalidateAdvice();
 }
 async function submit() {
   if (pending.value) return;
@@ -107,6 +125,7 @@ async function submit() {
     else if (result.errors.parentId) destinationInput.value?.focus();
     return;
   }
+  invalidateAdvice();
   submitting.value = true;
   emit('prepare', result.input);
   await nextTick();
@@ -174,7 +193,9 @@ async function submit() {
       <div v-else class="current-location"><el-icon aria-hidden="true"><FolderOpened /></el-icon><div><span>当前目录</span><p>{{ currentFolder }}</p></div></div>
 
       <div v-if="kind === 'bookmark'" class="advice-section">
-        <div class="advice-prompt"><div><strong>让 AI 帮你归类</strong><p>{{ aiAvailable ? '将标题与地址发给已配置的 AI 服务，获取命名和目录建议。' : '可选功能，配置 AI 后即可获取命名和目录建议。' }}</p></div><el-button :disabled="pending" :loading="requestingAdvice" :icon="MagicStick" @click="requestAdvice">{{ aiAvailable ? '获取建议' : '配置 AI' }}</el-button></div>
+        <div class="advice-prompt"><div><strong>AI 自动归类建议</strong><p>{{ requestingAdvice ? '正在根据标题、网址和目录信息生成建议，可继续编辑或保存。' : autoEnabled ? '填写后自动建议标题和目录，采用前不会修改你的输入。' : '本地功能可直接使用；配置并测试 AI、同意元数据发送后，可开启自动建议。' }}</p></div><el-button v-if="!autoEnabled" @click="emit('open-settings')">设置 AI</el-button></div>
+        <p v-if="autoEnabled && automaticRequests >= 3 && !visibleAdvice && !requestingAdvice && !adviceError" class="field-hint">本次自动建议次数已用完，仍可直接预览更改。</p>
+        <p v-if="adviceError" class="field-error" role="alert">AI 建议暂不可用：{{ adviceError }} <el-button size="small" :disabled="pending || requestingAdvice" @click="requestAdvice">重试建议</el-button></p>
         <div v-if="visibleAdvice" class="advice-result" aria-live="polite">
           <span class="advice-label">AI 建议</span><strong>{{ visibleAdvice.title }}</strong><p class="advice-folder"><el-icon aria-hidden="true"><FolderOpened /></el-icon>{{ suggestedFolder?.path || suggestedFolder?.title || '建议目录已不可用' }}</p><p>{{ visibleAdvice.reason }}</p>
           <el-button size="small" :disabled="!canUseAdvice || pending" @click="useAdvice">采用建议</el-button><span v-if="!canUseAdvice" class="field-error">建议已失效，可以重新获取。</span>

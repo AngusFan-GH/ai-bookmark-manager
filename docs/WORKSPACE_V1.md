@@ -4,7 +4,7 @@
 
 Two goals drive the UI: manage native bookmarks completely, and use saved material to solve real tasks. The browser owns bookmark titles, original URLs, folders and order. IndexedDB holds the searchable mirror, extracted snippets, conversations, plans, snapshots and audit evidence.
 
-The goal box provides immediate local search and an explicit AI action. A conversation uses unified `assist` mode; users need not select a model task mode. Legacy recommend/organize sessions remain readable. Fixed scope includes folder descendants, an optional literal query, and optionally 1–60 selected bookmark IDs. The UI shows the scope; proposals never expand it silently.
+The goal box provides local search and an explicit AI conversation action. After setup and separate automatic-suggestion opt-in, submitting a local search also offers bounded related-reference guidance; entering organization offers a plan suggestion for selected or visible bookmarks (at most 20). Ordinary typing does not send workspace search data. A conversation uses unified `assist` mode; users need not select a model task mode. Legacy recommend/organize sessions remain readable. Fixed scope includes folder descendants, an optional literal query, and optionally 1–60 selected bookmark IDs. The UI shows the scope; proposals never expand it silently.
 
 ## Entry points and actions
 
@@ -21,13 +21,13 @@ MiniMax returns structured references and proposals: existing-ID moves, title ed
 
 All cited URLs are mapped from stored records. Limited metadata/text is evidence, not proof that the whole original article was read. Fresh-query relevance takes priority over a bounded set of recent references. Large scopes may use a small query-expansion call before the final response; folder catalogs and candidate lists are bounded. Invalid expansion falls back to ordinary retrieval and does not broaden scope.
 
-New-bookmark advice is ephemeral and returns only a title, an existing folder and a reason, never a generated URL or a browser write.
+New-bookmark advice is ephemeral and returns only a title, an existing folder and a reason, never a generated URL or a browser write. When automatic suggestions are enabled, the popup debounces draft changes and cancels stale requests. Advice is displayed separately; “采用建议” changes only the draft, and “确认收藏” is still required to save. Local capture remains available if setup is skipped or AI fails. Workspace guidance remains separate from the local result table and requires the existing preview and approval flow for native writes.
 
 ## Credentials, privacy and content
 
 Regional endpoints: `https://api.minimax.cn/v1/chat/completions` and `https://api.minimax.io/v1/chat/completions`. Exact provider permission and data-sharing consent are required. Personal BYOK is supported; a shared commercial provider key requires a server-side design and is not bundled here.
 
-Session-only key storage is default. Optional local persistence is explicit, region-bound, restricted to trusted extension contexts where supported, not additionally encrypted, not synced, and excluded from exports/history/logs. Clearing or changing region removes both copies; storage failures block further use until resolved. Saving settings is not a connectivity test.
+Session-only key storage is default. Optional local persistence is explicit, region-bound, restricted to trusted extension contexts where supported, not additionally encrypted, not synced, and excluded from exports/history/logs. Clearing or changing region removes both copies; storage failures block further use until resolved. Saving settings alone is not a connectivity test. The first-run guide offers a persistent local-only skip path and can be reopened through AI settings. “保存并测试连接” sends only a fixed test prompt, with no bookmark metadata, URLs or conversation history. Automatic suggestions require a successful test for the current region/model/key, metadata consent and a separate opt-in; changing connection details invalidates that test.
 
 Excluded folders apply recursively to outbound AI data. Known private hosts, credential-bearing URLs and recognizable secret/signature parameters are conservatively excluded. This is not a universal secret detector. Historical transmitted candidate records, including uncited ones, are revalidated against current policy; moved/excluded/changed resources require a fresh task rather than resending stale history.
 

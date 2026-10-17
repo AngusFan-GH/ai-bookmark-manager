@@ -34,6 +34,7 @@ globalThis.fetch = async (url, init) => {
  const body = JSON.parse(init.body); globalThis.__mockCalls.push(body);
  if (globalThis.__mockMode === 'error') return new Response('{}',{status:429});
  if (globalThis.__mockMode === 'wait') return new Promise((resolve,reject)=>{init.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});});
+ if(body.messages.length===1 && body.messages[0].content==='Reply with OK.') return new Response(JSON.stringify({choices:[{message:{role:'assistant',content:'OK'},finish_reason:'stop'}]}),{status:200,headers:{'content-type':'application/json'}});
  const context = JSON.parse(body.messages.at(-1).content);
  const folder = context.existingFolders.find(f=>f.title==='Synthetic Target') || context.existingFolders[0];
  let result;
@@ -42,8 +43,8 @@ globalThis.fetch = async (url, init) => {
  const bookmark=context.bookmarks.find(b=>b.title==='Synthetic Guide') || context.bookmarks[0];
  if(!bookmark) throw new Error('Synthetic candidate missing');
  result={text:'Synthetic answer '+globalThis.__mockCalls.length,references:[{bookmarkId:bookmark.bookmarkId,reason:'Synthetic relevance'}],
- folders:[{proposalId:'new:synthetic',title:'Synthetic AI Folder',parentFolderId:folder.id}],
- moves:[{bookmarkId:bookmark.bookmarkId,targetFolderId:'new:synthetic',reason:'Synthetic move'}]};
+ folders:context.mode==='recommend'?[]:[{proposalId:'new:synthetic',title:'Synthetic AI Folder',parentFolderId:folder.id}],
+ moves:context.mode==='recommend'?[]:[{bookmarkId:bookmark.bookmarkId,targetFolderId:'new:synthetic',reason:'Synthetic move'}]};
  }
  return new Response(JSON.stringify({choices:[{message:{role:'assistant',content:JSON.stringify(result)},finish_reason:'stop'}]}),{status:200,headers:{'content-type':'application/json'}});
 };
@@ -98,6 +99,16 @@ try {
   const response = await page.evaluate(data=>chrome.runtime.sendMessage({...data,requestId:crypto.randomUUID()}),{type,...extra});
   assert.equal(response.ok,true,`${type}: ${JSON.stringify(response)}`); return response.data;
  };
+ // Fresh-profile onboarding must permit a genuinely local-only path.
+ const onboarding=page.getByRole('dialog',{name:'欢迎使用 · 连接你的 AI 助手',exact:true});
+ await onboarding.waitFor();await screenshot('first-run-onboarding');
+ await onboarding.getByRole('button',{name:'稍后配置，先用本地功能',exact:true}).click();
+ await onboarding.waitFor({state:'hidden'});
+ assert.equal((await request('ASSISTANT_SETTINGS_GET')).onboardingCompleted,true);
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),0);
+ await page.reload();await page.getByText('Bookmark Workspace',{exact:true}).waitFor();
+ assert.equal(await onboarding.isVisible(),false);
+ pass('first-install onboarding can be skipped persistently without any provider transmission');
  const ids = await native(async()=>{
   const tree=await chrome.bookmarks.getTree();const root=tree[0].children.find(n=>n.id==='1')||tree[0].children[0];
   const source=await chrome.bookmarks.create({parentId:root.id,title:'Synthetic Source'});
@@ -126,6 +137,9 @@ try {
   assert.equal(await box.getByRole('button',{name:/^批准并执行/}).count(),0);
  };
  const exportPlan=async name=>{const promise=page.waitForEvent('download');await page.getByRole('button',{name:'导出此计划的恢复备份',exact:true}).click();const file=path.join(artifactDir,name);await(await promise).saveAs(file);return file;};
+ await search('Synthetic Guide');
+ await page.waitForTimeout(1100);assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),0);
+ pass('local search after skipped setup remains usable and never calls an unconfigured provider');
  // Settings are entered visibly, with model validation, cancellation and explicit local opt-in.
  await page.getByRole('button',{name:'AI 设置',exact:true}).click();
  let settingsDialog=page.getByRole('dialog',{name:'AI 连接与数据范围',exact:true});
@@ -140,9 +154,46 @@ try {
  await choose(settingsDialog.getByRole('checkbox',{name:'在此设备记住密钥（可选）',exact:true}));
  await choose(settingsDialog.getByRole('checkbox',{name:/我同意将当前对话范围/}));
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('settings '+width);await screenshot('settings-'+width);}
- await settingsDialog.getByRole('button',{name:'保存设置',exact:true}).click();await settingsDialog.waitFor({state:'hidden'});
+ await choose(settingsDialog.getByRole('checkbox',{name:'自动提供 AI 建议',exact:true}));
+ await settingsDialog.getByRole('button',{name:'保存并测试连接',exact:true}).click();
+ await eventually(async()=>assert.equal((await request('ASSISTANT_SETTINGS_GET')).connectionTested,true));
+ await settingsDialog.waitFor({state:'hidden'});
+ const connectionCalls=await worker.evaluate(()=>globalThis.__mockCalls);
+ assert.equal(connectionCalls.length,1);assert.deepEqual(connectionCalls[0].messages,[{role:'user',content:'Reply with OK.'}]);
  assert.equal((await request('ASSISTANT_SETTINGS_GET')).keyStorage,'local');
- pass('visible settings validate inline, cancel safely, and save explicit remember-key opt-in');
+ pass('settings reopen after skip, validate inline, cancel safely, and test connectivity with a fixed bookmark-free prompt');
+ // Exercise automatic guidance separately, then isolate the existing manual journeys.
+ const configuredSettings=await request('ASSISTANT_SETTINGS_GET');
+ const autoCard=page.getByRole('complementary',{name:'自动 AI 建议',exact:true});
+ await search('Synthetic Guide');await autoCard.getByRole('button',{name:'查看建议详情',exact:true}).waitFor();
+ assert.equal(await page.locator('.results-panel tbody tr').count(),1);
+ assert.equal((await native(id=>chrome.bookmarks.get(id),ids.guide))[0].parentId,ids.nested);
+ let autoCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
+ assert.equal(autoCall.mode,'recommend');assert(autoCall.bookmarks.length<=60);assert(autoCall.bookmarks.every(bookmark=>!bookmark.snippet));
+ pass('explicit local search automatically adds references alongside unchanged local results without native writes');
+ await page.getByRole('button',{name:/整理书签/}).click();await autoCard.getByRole('button',{name:'查看建议详情',exact:true}).waitFor();
+ autoCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
+ assert.equal(autoCall.mode,'organize');assert(autoCall.bookmarks.every(bookmark=>!bookmark.snippet));assert.equal(autoCall.scope.bookmarkIds.length,1);assert.equal(autoCall.bookmarks.length,1);
+ assert.equal(autoCall.bookmarks[0].title,'Synthetic Guide');
+ assert.equal((await native(id=>chrome.bookmarks.get(id),ids.guide))[0].parentId,ids.nested);
+ pass('entering organize automatically scopes a no-write suggestion to visible bookmarks');
+ await browse();await worker.evaluate(()=>{globalThis.__mockMode='wait';});
+ let waitingCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);await search('Synthetic');
+ await eventually(async()=>assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),waitingCalls+1));
+ await autoCard.getByRole('button',{name:'取消本次建议',exact:true}).click();await autoCard.waitFor({state:'hidden'});
+ await page.waitForTimeout(1100);assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),waitingCalls+1);
+ waitingCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);await search('Guide');
+ await eventually(async()=>assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),waitingCalls+1));
+ await search('');await autoCard.waitFor({state:'hidden'});
+ await worker.evaluate(()=>{globalThis.__mockMode='ok';});
+ pass('automatic suggestions can be canceled and invalidated by changing search; neither silently retries');
+ await request('ASSISTANT_SETTINGS_SAVE',{settings:{...configuredSettings,consent:false}});await page.reload();await goal().waitFor();
+ const callsWithoutConsent=await worker.evaluate(()=>globalThis.__mockCalls.length);await search('Synthetic Guide');
+ await page.waitForTimeout(1100);assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsWithoutConsent);assert.equal(await autoCard.count(),0);
+ pass('saved and tested key without metadata consent never triggers automatic search');
+ await request('ASSISTANT_SETTINGS_SAVE',{settings:{...configuredSettings,autoSuggestions:false}});
+ await page.reload();await goal().waitFor();
+ await worker.evaluate(()=>{globalThis.__mockCalls=[];});
  // No backend-generated session or turn: the real goal composer creates and sends both turns.
  await goal().fill('Organize Synthetic Guide');await page.getByRole('button',{name:'询问 AI',exact:true}).click();
  await page.getByText('Synthetic answer 1',{exact:true}).waitFor();
@@ -273,6 +324,7 @@ try {
  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);await page.getByRole('textbox',{name:'搜索书签或描述你的目标',exact:true}).waitFor();
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('sidepanel '+width);await screenshot('sidepanel-'+width);}
  pass('sidepanel document loads the complete workspace without horizontal overflow');
+ await request('ASSISTANT_SETTINGS_SAVE',{settings:{...await request('ASSISTANT_SETTINGS_GET'),autoSuggestions:true}});
  // Opening popup.html as a tab cannot reproduce Chrome's activeTab grant. Use the real extension action popup.
  const sourcePage=await context.newPage();await sourcePage.goto('https://example.test/capture?Keep=YES#frag');await sourcePage.bringToFront();
  const popupPromise=context.waitForEvent('page',{timeout:15000}).catch(error=>({popupError:String(error)}));
@@ -284,6 +336,17 @@ try {
  console.log('Popup target diagnostics:',JSON.stringify(targets));
  const popup=await popupPromise;
  assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();
+ await popup.locator('.advice').waitFor();
+ assert.equal(await popup.getByLabel('标题',{exact:true}).inputValue(),'Synthetic capture page');
+ const originalFolder=await popup.getByLabel('保存到',{exact:true}).inputValue();
+ assert.notEqual(originalFolder,ids.target);
+ const popupAdviceCall=await worker.evaluate(()=>JSON.parse(globalThis.__mockCalls.at(-1).messages.at(-1).content));
+ assert.equal(popupAdviceCall.page.url,'https://example.test/capture?Keep=YES#frag');
+ await popup.getByRole('button',{name:'采用建议',exact:true}).click();
+ assert.equal(await popup.getByLabel('标题',{exact:true}).inputValue(),'Synthetic advised title');
+ assert.equal(await popup.getByLabel('保存到',{exact:true}).inputValue(),ids.target);
+ assert.equal((await native(()=>chrome.bookmarks.search({url:'https://example.test/capture?Keep=YES#frag'}))).length,0);
+ pass('native popup automatically offers scoped advice without overwriting fields or saving; explicit apply changes the draft only');
  await popup.getByLabel('标题',{exact:true}).fill('Synthetic Quick Save');
  await popup.getByRole('button',{name:'确认收藏',exact:true}).click();await popup.getByRole('button',{name:'✓ 已收藏',exact:true}).waitFor();
  await popup.getByRole('searchbox',{name:'搜索已有书签',exact:true}).fill('Synthetic Quick Save');
