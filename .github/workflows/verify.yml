@@ -4,6 +4,11 @@ on:
     branches: [main, 'chloe/**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      live_minimax:
+        description: Run five synthetic MiniMax CN acceptance calls (uses repository secret)
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -44,3 +49,33 @@ jobs:
           path: .output/chrome-mv3/
           include-hidden-files: true
           if-no-files-found: error
+
+  minimax-live:
+    needs: verify
+    # Explicit one-shot opt-in only; never runs on PRs or ordinary future pushes.
+    if: >-
+      github.repository == 'AngusFan-GH/ai-bookmark-manager' &&
+      github.ref == 'refs/heads/chloe/bookmark-workspace' &&
+      github.run_attempt == 1 &&
+      ((github.event_name == 'workflow_dispatch' && inputs.live_minimax == true) ||
+       (github.event_name == 'push' && github.event.head_commit.message == 'test: run bounded MiniMax acceptance [live-20261017-v1]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Compile the live harness without credentials
+        run: node tests/live/run-minimax.mjs --build
+      - name: Five bounded synthetic calls through the actual MiniMax provider and domain parser
+        run: node tests/live/run-minimax.mjs
+        timeout-minutes: 8
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          LIVE_REQUESTED: ${{ inputs.live_minimax }}
+          LIVE_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
