@@ -17,6 +17,16 @@ function setup(bookmarks = [bookmark('a')], folders = [folder('f'), folder('targ
 const input = (sessionId: string, text = 'Find resources') => ({ sessionId, text, apiKey: 'session-only-secret', settings: { region: 'global' as const } });
 
 describe('bookmark assistant sessions', () => {
+  it('states validator limits, uniqueness and exact ID sources in the system contract', async () => {
+    const h = setup(); const session = await h.service.createSession({ mode: 'organize' });
+    await h.service.turn(input(session.id));
+    const system = h.calls[0].messages[0].content;
+    for (const requirement of ['12000 characters', '2000 characters', 'action reasons must be nonempty', 'no duplicate bookmarkId', 'bookmarks[].bookmarkId', 'existingFolders[].id', 'never titles, paths or citation IDs', 'max 300 characters', '1–64 letters', 'distinct from existing folder IDs', '1–80 characters', 'Unicode control or format characters', 'duplicate folder names', 'NFKC normalization', 'At most one action per bookmark']) expect(system).toContain(requirement);
+    const data = JSON.parse(h.calls[0].messages.at(-1)!.content);
+    expect(data.bookmarks[0].bookmarkId).toBe('a');
+    expect(data.existingFolders.map((f: { id: string }) => f.id).sort()).toEqual(['f', 'target']);
+  });
+
   it('retains multi-turn context, exact URLs, stable citations and raw assistant history', async () => {
     const h = setup(); const session = await h.service.createSession({ mode: 'recommend', scope: { folderId: 'f' } });
     const first = await h.service.turn(input(session.id));

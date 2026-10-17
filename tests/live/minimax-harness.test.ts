@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { LIVE_COMMIT_MESSAGE, liveGate, runLiveAcceptance, safeFailure, safeValidationReason } from './minimax-acceptance';
+import { LIVE_COMMIT_MESSAGE, liveGate, runLiveAcceptance, safeFailure, safeValidationReason, AcceptanceAssertion, safeAssertionReason } from './minimax-acceptance';
 import { SuggestionValidationError } from '../../src/domain/assistant/validation';
 import { AssistantError } from '../../src/domain/assistant/types';
 
@@ -26,7 +26,7 @@ function streamedResponse(content: unknown, options: { finish?: string; done?: b
     else controller.enqueue(new TextEncoder().encode(chunk));
   } }), { headers: { 'content-type': 'text/event-stream' } });
 }
-function successfulFetch(options: { done?: boolean } = {}) {
+function successfulFetch(options: { done?: boolean; singleChunk?: boolean } = {}) {
   return vi.fn<typeof fetch>()
     .mockResolvedValueOnce(response('OK'))
     .mockResolvedValueOnce(streamedResponse(suggestion({ references: [reference] }), options))
@@ -85,6 +85,33 @@ describe('live acceptance gates and reporting (offline)', () => {
       expect(call.sseDiagnostics).toMatchObject({ stopFrames: 1, doneMarkers: 0, eof: true, trailingData: false, readFailed: false });
     }
   });
+  it.each([true, false])('accepts a coalesced short SSE answer before completion (DONE=%s)', async done => {
+    const report = await runLiveAcceptance('synthetic-key', successfulFetch({ done, singleChunk: true }));
+    expect(report.passed).toBe(true);
+    for (const call of report.calls.filter(call => call.streamRequested)) {
+      expect(call).toMatchObject({ previewCallbacks: 1, previewBeforeCompletion: true, incrementalPreview: false, stopValidated: true });
+    }
+  });
+  it('rejects a completed answer with no safe pre-completion preview', async () => {
+    const { text, ...rest } = suggestion({ references: [reference] });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('OK')).mockResolvedValueOnce(streamedResponse({ ...rest, text }));
+    const report = await runLiveAcceptance('synthetic-key', fetcher);
+    expect(report.checks.at(-1)).toMatchObject({ failure: 'assertion', assertionReason: 'preview-missing' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it('identifies a semantically wrong but valid recommendation without exposing text', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('OK')).mockResolvedValueOnce(streamedResponse(suggestion({ references: [{ bookmarkId: 'synthetic-cooking', reason: 'Wrong topic.' }] })));
+    const report = await runLiveAcceptance('synthetic-key', fetcher);
+    expect(report.checks.at(-1)).toMatchObject({ phase: 'recommendation', failure: 'assertion', assertionReason: 'recommendation-reference' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(report)).not.toContain('Wrong topic');
+  });
+  it('preserves a fixed callback assertion even if the provider wraps the exception', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('OK')).mockResolvedValueOnce(streamedResponse(suggestion({ text: 'Unsafe schema: "moves": []', references: [reference] })));
+    const report = await runLiveAcceptance('synthetic-key', fetcher);
+    expect(report.checks.at(-1)).toMatchObject({ failure: 'assertion', assertionReason: 'preview-unsafe-content' });
+    expect(JSON.stringify(report)).not.toContain('Unsafe schema');
+  });
   it('stops on authentication failure, with no retry or raw response disclosure', async () => {
     const secret = 'fake-secret-must-never-be-reported';
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(secret, { status: 401 }));
@@ -123,7 +150,7 @@ describe('live acceptance gates and reporting (offline)', () => {
     expect(report.checks[1]).toEqual({ phase: 'recommendation', passed: true });
     expect(report.calls[1].incrementalPreview).toBe(true);
   });
-  it.each([{ finish: 'length' }, { done: false, omitStop: true }, { omitStop: true }, { done: false, readError: true }, { done: false, partialRecord: true }, { singleChunk: true }])('fails closed on truncated or nonincremental SSE: %j', async options => {
+  it.each([{ finish: 'length' }, { done: false, omitStop: true }, { omitStop: true }, { done: false, readError: true }, { done: false, partialRecord: true }])('fails closed on incomplete or truncated SSE: %j', async options => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response('OK')).mockResolvedValueOnce(streamedResponse(suggestion({ references: [reference] }), options));
     const report = await runLiveAcceptance('synthetic-key', fetcher);
     expect(report.passed).toBe(false);
@@ -138,6 +165,15 @@ describe('live acceptance gates and reporting (offline)', () => {
     expect(report.passed).toBe(false);
     expect(report.calls[1].sseContentType).toBe(false);
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it('only emits fixed assertion enums', () => {
+    const known = new AcceptanceAssertion('context-recall');
+    known.message = 'PRIVATE_ASSERTION_TEXT';
+    expect(safeAssertionReason(known)).toBe('context-recall');
+    Object.assign(known, { assertionReason: 'PRIVATE_ASSERTION_REASON' });
+    expect(safeAssertionReason(known)).toBeUndefined();
+    expect(safeAssertionReason({ assertionReason: 'context-recall' })).toBeUndefined();
+    expect(safeAssertionReason(new Error('PRIVATE_ASSERTION_TEXT'))).toBeUndefined();
   });
   it('only emits known validation reason enums, never exception text or forged values', () => {
     const known = new SuggestionValidationError('move-target-id');
