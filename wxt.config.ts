@@ -34,7 +34,7 @@ export default defineConfig({
   manifest: {
     name: 'AI Bookmark Manager',
     description: 'AI-assisted bookmark search, native management, reviewable organization and recovery',
-    version: '0.2.0',
+    version: '0.3.0',
     permissions: ['bookmarks', 'storage', 'activeTab', 'sidePanel'],
     minimum_chrome_version: '116',
     // Link health is opt-in. The extension requests these at runtime from a

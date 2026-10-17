@@ -116,6 +116,32 @@ async function choose(input, checked=true) {
  if(await input.isChecked() !== checked) await input.locator('xpath=ancestor::label[1]').click();
  assert.equal(await input.isChecked(),checked,'Visible label must update native checked state');
 }
+async function settledModalEvidence(name,target) {
+ // Let CSS transitions finish on wall-clock time. Background extension windows
+ // may throttle rAF, so do not await animations.finished or renderer frames.
+ await new Promise(resolve=>setTimeout(resolve,400));
+ let state=[];let previousGeometry;
+ try {
+  await eventually(async()=>{
+   state=await target.evaluate(()=>[...document.querySelectorAll('.el-dialog,.el-overlay')].flatMap(element=>{
+    const rect=element.getBoundingClientRect();const style=getComputedStyle(element);
+    if(!rect.width||!rect.height||style.display==='none'||style.visibility!=='visible')return [];
+    const ancestors=[];
+    for(let current=element;current;current=current.parentElement){
+     const css=getComputedStyle(current);
+     ancestors.push({tag:current.tagName,className:String(current.className),opacity:Number(css.opacity),visibility:css.visibility});
+    }
+    return [{className:String(element.className),x:rect.x,y:rect.y,width:rect.width,height:rect.height,ancestors}];
+   }));
+   assert(state.every(element=>element.ancestors.every(ancestor=>ancestor.opacity===1&&ancestor.visibility==='visible')),name+': modal/overlay is still fading '+JSON.stringify(state));
+   const geometry=JSON.stringify(state.map(({className,x,y,width,height})=>({className,x,y,width,height})));
+   const stable=previousGeometry===geometry;previousGeometry=geometry;
+   assert(stable,name+': modal geometry has not settled between wall-clock samples');
+  },2000);
+ } finally {
+  if(state.length)await writeFile(path.join(artifactDir,name+'-modal-state.json'),JSON.stringify({name,sampledAt:Date.now(),state},null,2));
+ }
+}
 async function screenshot(name,target=page,fullPage=true) {
  checkpoint('screenshot: '+name);
  // Screenshots are evidence, not a frame-scheduler assertion. Headed extension
@@ -123,6 +149,7 @@ async function screenshot(name,target=page,fullPage=true) {
  // UI/geometry assertions, then take an ordinary bounded capture without
  // changing animation state or waiting for renderer frame callbacks.
  await eventually(async()=>assert.equal(await target.locator('.el-message:visible').count(),0));
+ await settledModalEvidence(name,target);
  try {
   await target.screenshot({path:path.join(artifactDir,name+'.png'),fullPage,timeout:10000});
  } catch(error) {
