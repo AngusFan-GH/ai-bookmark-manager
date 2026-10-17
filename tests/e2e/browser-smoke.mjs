@@ -89,10 +89,10 @@ async function choose(input, checked=true) {
 }
 async function screenshot(name) {
  checkpoint('screenshot: '+name);
- // Capture stable product UI, not the opening modal transition or a fading toast.
- await bounded(page.evaluate(async()=>{
-  await Promise.all(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished.catch(()=>{})));
- }),5000,'UI animation stabilization');
+ // Playwright fast-forwards finite animations and temporarily cancels infinite
+ // animations for this capture. Awaiting every Animation.finished promise can
+ // hang after a prior capture/resize leaves an animation paused or idle.
+ // Keep the separate visible-toast check and all geometry/action assertions.
  await eventually(async()=>assert.equal(await page.locator('.el-message:visible').count(),0));
  await page.screenshot({path:path.join(artifactDir,name+'.png'),fullPage:true,animations:'disabled',timeout:10000});
 }
@@ -112,6 +112,20 @@ async function reachable(locator, label) {
   });
   assert(state.left>=0&&state.right<=state.width+1&&state.top>=0&&state.bottom<=state.height+1&&state.hit,`${label}: control clipped or covered ${JSON.stringify(state)}`);
  });
+}
+async function nativePopupLayout(popup,label) {
+ // Observe browser-managed action-window size. Never emulate a viewport on a
+ // CDP `other` target: doing so hides Chrome autosizing regressions.
+ const metrics=await popup.evaluate(()=>({
+  width:innerWidth,scroll:document.documentElement.scrollWidth,
+  headings:[...document.querySelectorAll('h1,h2')].map(element=>({text:element.textContent,height:element.getBoundingClientRect().height,fontSize:parseFloat(getComputedStyle(element).fontSize)})),
+  controls:[...document.querySelectorAll('input,select,button')].map(element=>({text:element.getAttribute('aria-label')||element.textContent,left:element.getBoundingClientRect().left,right:element.getBoundingClientRect().right})),
+ }));
+ await writeFile(path.join(artifactDir,label+'-geometry.json'),JSON.stringify(metrics,null,2));
+ assert(metrics.width>=380&&metrics.width<=400,`${label}: native popup must be 380–400 CSS px, got ${metrics.width}`);
+ assert(metrics.scroll<=metrics.width+1,`${label}: native popup has horizontal overflow`);
+ for(const heading of metrics.headings) assert(heading.height<=heading.fontSize*1.8,`${label}: heading wraps vertically: ${JSON.stringify(heading)}`);
+ for(const control of metrics.controls) assert(control.left>=0&&control.right<=metrics.width+1,`${label}: control clipped horizontally: ${JSON.stringify(control)}`);
 }
 async function settingsFooter(dialog,label) {
  await reachable(dialog.getByRole('button',{name:'保存并测试连接',exact:true}),label+' save/test');
@@ -420,8 +434,22 @@ try {
   assert(!popup.popupError,`Native action popup was not exposed as a Playwright page: ${popup.popupError}; see popup-targets.json`);
   popup.on('pageerror',e=>errors.push(e.message));await popup.waitForLoadState();return popup;
  };
+ // Exercise an unsupported page first: the minimal initial content must not
+ // collapse native autosizing before a later valid-page capture opens.
+ await sourcePage.goto('about:blank');
+ const unavailableCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);
+ const unavailablePopup=await openNativePopup();
+ await unavailablePopup.getByText('这个页面无法快捷收藏。请在普通网页中打开扩展。',{exact:true}).waitFor();
+ await nativePopupLayout(unavailablePopup,'popup-unavailable-page');
+ assert.equal(await unavailablePopup.locator('button.primary').count(),0);
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),unavailableCalls);
+ await unavailablePopup.screenshot({path:path.join(artifactDir,'popup-unavailable-page.png'),animations:'disabled',timeout:10000});
+ await unavailablePopup.close();
+ pass('native unsupported-page popup retains readable width and headings without capture or provider calls');
+ await sourcePage.goto('https://example.test/capture?Keep=YES#frag');
  const popup=await openNativePopup();
  await popup.getByRole('button',{name:'采用标题',exact:true}).waitFor();
+ await nativePopupLayout(popup,'popup-unsaved-page');
  await popup.screenshot({path:path.join(artifactDir,'popup-unsaved-inline-advice.png')});
  assert.equal(await popup.getByLabel('标题',{exact:true}).inputValue(),'Synthetic capture page');
  const originalFolder=await popup.getByLabel('保存到',{exact:true}).inputValue();
@@ -452,6 +480,7 @@ try {
  const callsBeforeExisting=await worker.evaluate(()=>globalThis.__mockCalls.length);
  const existingPopup=await openNativePopup();
  await existingPopup.getByText('这个页面已收藏',{exact:true}).waitFor();
+ await nativePopupLayout(existingPopup,'popup-existing-page');
  const savedStatus=existingPopup.locator('.saved-status');
  await savedStatus.getByText(/Synthetic Fresh Capture Folder/).waitFor();
  assert.equal(await savedStatus.getByRole('button',{name:'查看',exact:true}).count(),2);

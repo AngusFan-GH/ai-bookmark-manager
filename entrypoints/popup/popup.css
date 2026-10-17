@@ -1,0 +1,15 @@
+/* Chrome sizes an action popup from the document's intrinsic width. Anchor that
+   width before Vue mounts: a viewport-relative cap on an inner component can
+   feed Chrome's initially narrow viewport back into its auto-size calculation.
+   Keep the body fixed and let Chrome constrain the native window to the screen;
+   the inner content follows the available body width, including its scrollbar. */
+body {
+  width: 380px;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+#app {
+  width: 100%;
+  min-width: 0;
+}
