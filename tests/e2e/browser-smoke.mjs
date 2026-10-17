@@ -420,7 +420,22 @@ try {
  const sessions=await request('ASSISTANT_SESSIONS');const session=await request('ASSISTANT_GET',{sessionId:sessions[0].id});
  assert.equal(session.messages.length,6);assert.equal(session.messages[1].references[0].citationId,session.messages[3].references[1].citationId);
  assert.equal(session.citations[0].url,'https://example.test/guide?Original=YES#frag');
- const calls=await worker.evaluate(()=>globalThis.__mockCalls);assert.equal(calls.length,3);assert.equal(calls[1].messages.length,4);assert.equal(calls[2].messages.length,6);
+ const calls=await worker.evaluate(()=>globalThis.__mockCalls);assert.equal(calls.length,3);
+ // Full local history survives; outbound history deliberately keeps only the last
+ // exchange plus structured task context, without retransmitting stale candidates.
+ assert.deepEqual(session.messages.filter(message=>message.role==='user').map(message=>message.text),[
+  'Organize Synthetic Guide; only beginner-friendly Chinese sources',
+  'Explain the second item; retain the beginner-friendly Chinese-source requirement',
+  'Make a concise reading plan with the same constraints',
+ ]);
+ for(const call of calls.slice(1)) {
+  assert.deepEqual(call.messages.map(message=>message.role),['system','user','assistant','user']);
+  assert.deepEqual(Object.keys(JSON.parse(call.messages[1].content)),['request'],'Historical user exchange must not carry old candidate metadata');
+ }
+ assert.equal(JSON.parse(calls[2].messages[1].content).request,session.messages[2].text);
+ assert.equal(JSON.parse(calls[2].messages[2].content).text,'Synthetic answer 2');
+ assert.equal(thirdContext.taskContext.objective,session.messages[0].text);
+ assert.deepEqual(thirdContext.taskContext.refinements,[session.messages[2].text]);
  await page.reload();await eventually(async()=>assert.equal(await goal().inputValue(),''));await openTool('历史与恢复');
  await page.getByRole('button',{name:/Organize Synthetic Guide/}).click();await page.getByRole('dialog',{name:'历史与恢复',exact:true}).waitFor({state:'hidden'});
  assert.equal(await page.getByRole('dialog',{name:'切换对话',exact:true}).count(),0);await page.getByText('Synthetic answer 3',{exact:true}).waitFor();

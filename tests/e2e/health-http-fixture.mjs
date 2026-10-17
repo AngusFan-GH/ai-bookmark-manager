@@ -47,7 +47,17 @@ export async function assertHealthHttpMatrix({native,request,fixture,root,eventu
   const browserIds={};
   for(const name of cases)browserIds[name]=(await native(data=>chrome.bookmarks.create(data),{parentId:folder.id,title:'Controlled HTTP '+name,url:healthFixtureUrl(name)})).id;
   await request('SYNC');
-  const rows=(await request('BOOKMARKS_LIST',{limit:1000})).rows;
+  // Native create events also schedule a 350ms background reconciliation. Wait
+  // for its observable generation to settle before freezing scan evidence, or a
+  // genuine later sync would correctly mark every result outdated mid-test.
+  let rows;
+  await eventually(async()=>{
+   const before=(await request('BOOKMARKS_LIST',{limit:1000})).rows;
+   await new Promise(resolve=>setTimeout(resolve,500));
+   const after=(await request('BOOKMARKS_LIST',{limit:1000})).rows;
+   assert.deepEqual(after.map(row=>[row.id,row.syncGeneration]),before.map(row=>[row.id,row.syncGeneration]),'Fixture index reconciliation is still pending');
+   rows=after;
+  });
   const ids=Object.fromEntries(cases.map(name=>[name,rows.find(row=>row.browserId===browserIds[name])?.id]));
   assert(Object.values(ids).every(Boolean),'Every HTTP fixture must be in the real bookmark index');
   const scanCases=cases.filter(name=>name!=='cancel');
