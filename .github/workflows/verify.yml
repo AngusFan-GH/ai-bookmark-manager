@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       live_minimax:
-        description: Run five synthetic MiniMax CN acceptance calls (uses repository secret)
+        description: Run five synthetic MiniMax CN calls including SSE streaming (uses repository secret)
         type: boolean
         default: false
 permissions:
@@ -59,7 +59,7 @@ jobs:
       github.ref == 'refs/heads/chloe/bookmark-workspace' &&
       github.run_attempt == 1 &&
       ((github.event_name == 'workflow_dispatch' && inputs.live_minimax == true) ||
-       (github.event_name == 'push' && github.event.head_commit.message == 'test: run bounded MiniMax acceptance [live-20261017-v1]'))
+       (github.event_name == 'push' && github.event.head_commit.message == 'test: run bounded MiniMax streaming acceptance [live-20261017-v2]'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -73,7 +73,7 @@ jobs:
       - run: npm ci
       - name: Compile the live harness without credentials
         run: node tests/live/run-minimax.mjs --build
-      - name: Five bounded synthetic calls through the actual MiniMax provider and domain parser
+      - name: Five bounded synthetic calls including actual MiniMax SSE and domain parsing
         run: node tests/live/run-minimax.mjs
         timeout-minutes: 8
         env:

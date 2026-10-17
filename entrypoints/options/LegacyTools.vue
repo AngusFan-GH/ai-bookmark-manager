@@ -50,8 +50,8 @@ async function backup() {
 <style scoped>
 .tools-panel { min-width:0; }
 .backup-panel { max-width:760px; padding:8px 4px 20px; }
-h2 { font-size:19px; margin:20px 0 12px; }
-p { font-size:14px; color:#526277; line-height:1.8; }
-.hint { padding:14px; background:#f0f4fb; border-radius:8px; margin-top:24px; }
+h2 { font-size:19px; font-weight:600; letter-spacing:-.3px; margin:20px 0 12px; }
+p { font-size:14px; color:var(--bookmark-secondary); line-height:1.8; }
+.hint { padding:14px; background:var(--bookmark-fill); border-radius:10px; margin-top:24px; }
 .backup-panel :deep(.el-alert) { margin-top:12px; }
 </style>

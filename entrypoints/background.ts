@@ -1,3 +1,4 @@
+import { attachAssistantStreamPort } from '../src/infrastructure/messaging/assistant-stream-port';
 import { executeWithIndexRefresh } from '../src/infrastructure/messaging/execution-refresh';
 import { registerWorkspaceHandlers, scopedBookmarks } from '../src/infrastructure/messaging/workspace-handlers';
 // entrypoints/background.ts
@@ -451,6 +452,8 @@ export default defineBackground(() => {
   });
 
   registerWorkspaceHandlers(router, { db, planService, canFetch: containsHealthPermission, readTree: () => adapter.getTree() });
+
+  chrome.runtime.onConnect.addListener(port => attachAssistantStreamPort(port, router, chrome.runtime.id, chrome.runtime.getURL('')));
 
   // ---- Message handler --------------------------------------------------
   // Reject messages from other extensions.

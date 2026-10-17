@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BookmarkDatabase } from '../../src/infrastructure/database/db';
 import { createAssistantRepository, sessionView, scopedBookmarks, validateSettings } from '../../src/infrastructure/messaging/workspace-handlers';
 import type { AssistantSession } from '../../src/domain/assistant/types';
@@ -29,5 +29,24 @@ describe('workspace request validation',()=>{
   expect(()=>validateSettings({region:'evil' as 'cn',model:'m',consent:true})).toThrow();
   expect(()=>validateSettings({region:'cn',model:'../bad',consent:true})).toThrow();
   expect(()=>validateSettings({region:'cn',model:'MiniMax-M2.5',consent:true})).not.toThrow();
+ });
+});
+
+
+describe('assistant commit cancellation boundary',()=>{
+ it('rolls back a staged session write when Stop arrives before transaction commit',async()=>{
+  const db=database();const repository=createAssistantRepository(db);const original=session();await repository.saveSession(original,null);
+  const controller=new AbortController();
+  const put=db.meta.put.bind(db.meta);
+  const spy=vi.spyOn(db.meta,'put').mockImplementationOnce((...args:Parameters<typeof put>)=>put(...args).then(result=>{controller.abort();return result;}));
+  const next={...original,revision:1,lastTurnRequestId:'request-to-cancel'};
+  const pending=repository.saveSession(next,0,controller.signal);const assertion=expect(pending).rejects.toThrow();
+  await assertion;spy.mockRestore();
+  expect(await repository.getSession(original.id)).toEqual(original);
+ });
+ it('leaves a turn committed before Stop available for terminal reconciliation',async()=>{
+  const db=database();const repository=createAssistantRepository(db);const original=session();await repository.saveSession(original,null);const controller=new AbortController();
+  const next={...original,revision:1,lastTurnRequestId:'completed-request'};expect(await repository.saveSession(next,0,controller.signal)).toBe(true);controller.abort();
+  expect((await repository.getSession(original.id))?.lastTurnRequestId).toBe('completed-request');expect((await repository.getSession(original.id))?.revision).toBe(1);
  });
 });

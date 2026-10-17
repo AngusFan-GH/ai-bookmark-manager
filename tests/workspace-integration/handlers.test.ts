@@ -266,3 +266,19 @@ describe('opt-in region-bound key persistence', () => {
   });
 
 });
+
+describe('stream request settlement visibility',()=>{
+ it('waits for a turn writer before returning a reconciliation read',async()=>{
+  const pendingResult=deferred<any>();mocks.turn.mockImplementation(()=>pendingResult.promise);const {router,db}=fixture();
+  const pending=router.dispatch(turn,{onText:()=>{}});await vi.waitFor(()=>expect(mocks.turn).toHaveBeenCalledOnce());
+  let readFinished=false;const reading=router.dispatch({type:'ASSISTANT_GET',sessionId:'s1',requestId:'read'}).then(value=>{readFinished=true;return value;});
+  await Promise.resolve();expect(readFinished).toBe(false);
+  const saved={id:'s1',lastTurnRequestId:turn.requestId,providerHistory:[]};await db.meta.put({key:'assistant:session:s1',value:saved,updatedAt:1});pendingResult.resolve(saved);
+  expect((await pending).ok).toBe(true);expect(await reading).toMatchObject({ok:true,data:{id:'s1',lastTurnRequestId:turn.requestId}});
+ });
+ it('passes correlation, revision, and disconnect cancellation through all existing preflight gates',async()=>{
+  const permission=deferred<boolean>();const {router}=fixture(vi.fn(()=>permission.promise));const controller=new AbortController();
+  const pending=router.dispatch({...turn,expectedRevision:0},{signal:controller.signal,onText:()=>{}});controller.abort();permission.resolve(true);
+  expect((await pending).ok).toBe(false);expect(mocks.turn).not.toHaveBeenCalled();
+ });
+});

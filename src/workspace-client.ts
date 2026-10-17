@@ -1,3 +1,4 @@
+import { streamAssistantTurn, type StreamTurnOptions } from './assistant-stream-client';
 import { request } from './client';
 import type { AssistantSession, AssistantMode, AssistantScope } from './domain/assistant/types';
 import type { BookmarkRecord } from './domain/bookmarks/types';
@@ -17,7 +18,7 @@ export type WorkspaceRequest = { requestId: string } & (
   | {type:'ASSISTANT_TEST_CONNECTION'} | {type:'ASSISTANT_ONBOARDING_COMPLETE'} | {type:'ASSISTANT_ADVICE_CANCEL';adviceRequestId:string}
   | {type:'ASSISTANT_KEY_CLEAR'} | {type:'ASSISTANT_SESSIONS'}
   | {type:'ASSISTANT_CREATE';input:{mode:AssistantMode;scope?:AssistantScope}}
-  | {type:'ASSISTANT_GET';sessionId:string} | {type:'ASSISTANT_TURN';sessionId:string;text:string;automatic?:boolean}
+  | {type:'ASSISTANT_GET';sessionId:string} | {type:'ASSISTANT_TURN';sessionId:string;text:string;automatic?:boolean;expectedRevision?:number}
   | {type:'ASSISTANT_CANCEL';sessionId:string} | {type:'ORGANIZATION_DUPLICATES';folderId?:string}
   | {type:'ORGANIZATION_PREPARE';input:OrganizationInput} | {type:'PLAN_BACKUP_EXPORT';planId:string}
   | {type:'CONTENT_FETCH';bookmarkIds:string[]}
@@ -38,7 +39,9 @@ export const clearAssistantKey = () => request<void>({type:'ASSISTANT_KEY_CLEAR'
 export const listSessions = () => request<SessionSummary[]>({type:'ASSISTANT_SESSIONS',requestId:id()});
 export const createSession = (input:{mode:AssistantMode;scope?:AssistantScope}) => request<AssistantSessionView>({type:'ASSISTANT_CREATE',input,requestId:id()});
 export const getSession = (sessionId:string) => request<AssistantSessionView>({type:'ASSISTANT_GET',sessionId,requestId:id()});
-export const sendTurn = (sessionId:string,text:string,options:{automatic?:boolean}={}) => request<AssistantSessionView>({type:'ASSISTANT_TURN',sessionId,text,...options,requestId:id()});
+export const sendTurn = (sessionId:string,text:string,options:StreamTurnOptions={}) => options.onText || options.signal
+  ? streamAssistantTurn(sessionId,text,id(),options)
+  : request<AssistantSessionView>({type:'ASSISTANT_TURN',sessionId,text,automatic:options.automatic,expectedRevision:options.expectedRevision,requestId:id()});
 export const cancelTurn = (sessionId:string) => request<void>({type:'ASSISTANT_CANCEL',sessionId,requestId:id()});
 export const analyzeDuplicates = (folderId?:string) => request<DuplicateResult>({type:'ORGANIZATION_DUPLICATES',folderId,requestId:id()});
 export const prepareOrganization = (input:OrganizationInput) => request<OperationPlan>({type:'ORGANIZATION_PREPARE',input,requestId:id()});

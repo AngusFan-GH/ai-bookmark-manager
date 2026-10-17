@@ -3,7 +3,17 @@ import { AssistantError } from './types';
 
 /** Plain text only. URLs come solely from citation snapshots, never generated prose. */
 export function sanitizeModelText(value: string): string {
-  return value.replace(/<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi, '')
+  // Depth-aware suppression prevents nested or unterminated thought blocks
+  // from exposing their tail after an inner closing tag.
+  let plain = ''; let depth = 0; let cursor = 0;
+  for (const tag of value.matchAll(/<\/?think\b[^>]*>/gi)) {
+    const index = tag.index!;
+    if (depth === 0) plain += value.slice(cursor, index);
+    if (/^<\//.test(tag[0])) depth = Math.max(0, depth - 1); else depth++;
+    cursor = index + tag[0].length;
+  }
+  if (depth === 0) plain += value.slice(cursor);
+  return plain.replace(/<think\b[\s\S]*$/gi, '')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/(?:[a-z][a-z\d+.-]*:\/\/|(?:javascript|data|mailto):|www\.)[^\s<>]*/gi, '[link omitted]')
     .replace(/\b(?:[a-z\d-]+\.)+(?:com|org|net|io|cn|dev|ai|edu|gov|co)(?:\/[^\s<>]*)?/gi, '[link omitted]')
@@ -12,14 +22,25 @@ export function sanitizeModelText(value: string): string {
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function keys(value: Record<string, unknown>, expected: string[]): boolean { return Object.keys(value).every(k => expected.includes(k)) && expected.every(k => k in value); }
 function fail(message = '模型建议未通过安全校验（字段、书签或文件夹 ID 不符合要求）。请缩小范围后重试；未保存或执行任何建议。'): never { throw new AssistantError('validation', message); }
+/** Null means an outer reasoning wrapper is incomplete. Nested wrappers must
+ * close at depth zero before any following JSON may be treated as an answer. */
+export function stripLeadingThinking(content: string): string | null {
+  let text = content.trimStart();
+  while (/^<think\b/i.test(text)) {
+    let depth = 0; let end = -1;
+    for (const tag of text.matchAll(/<\/?think\b[^>]*>/gi)) {
+      depth += /^<\//.test(tag[0]) ? -1 : 1;
+      if (depth === 0) {end = tag.index! + tag[0].length;break;}
+    }
+    if (end < 0) return null;
+    text = text.slice(end).trimStart();
+  }
+  return text;
+}
 /** Unwrap only complete outer wrappers. Never extract arbitrary JSON from prose or repair partial actions. */
 function unwrapResponse(content: string): string {
-  let text = content.trim();
-  while (/^<think\b/i.test(text)) {
-    const end = text.match(/<\/think\s*>/i);
-    if (!end || end.index === undefined) fail('模型只返回了未完成的思考内容。请提高输出 token 上限或缩小范围后重试；未保存或执行任何建议。');
-    text = text.slice(end.index + end[0].length).trim();
-  }
+  const text = stripLeadingThinking(content.trim());
+  if (text === null) fail('模型只返回了未完成的思考内容。请提高输出 token 上限或缩小范围后重试；未保存或执行任何建议。');
   const fence = text.match(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/i)
     ?? text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   return fence ? fence[1].trim() : text;

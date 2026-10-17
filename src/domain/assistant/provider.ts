@@ -1,3 +1,4 @@
+import { readMiniMaxStream } from './stream';
 import { AssistantError, type AssistantProvider, type ProviderMessage } from './types';
 
 // Official compatibility reference: https://platform.minimax.io/docs/api-reference/text-openai-api
@@ -5,7 +6,7 @@ export const MINIMAX_ENDPOINTS = Object.freeze({ global: 'https://api.minimax.io
 export const DEFAULT_MINIMAX_MODEL = 'MiniMax-M2.5';
 /** No storage, retries, arbitrary endpoint, tools, or key logging. fetch is injectable for tests. */
 export function createMiniMaxProvider(fetcher: typeof fetch = fetch): AssistantProvider {
-  return { async complete({ messages, settings, apiKey, signal }) {
+  return { async complete({ messages, settings, apiKey, signal, onContent }) {
     if (settings.region !== 'global' && settings.region !== 'cn') throw new AssistantError('validation', 'Choose a supported MiniMax region.');
     if (!apiKey.trim()) throw new AssistantError('validation', '请先在 AI 设置中填写 MiniMax API Key。');
     if (/[\r\n]/.test(apiKey)) throw new AssistantError('validation', 'API Key 含换行符，请重新粘贴完整的 MiniMax API Key。');
@@ -17,13 +18,14 @@ export function createMiniMaxProvider(fetcher: typeof fetch = fetch): AssistantP
       const response = await fetcher(MINIMAX_ENDPOINTS[settings.region], {
         method: 'POST', redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', signal,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, messages, max_completion_tokens: limit, reasoning_split: true, stream: false }),
+        body: JSON.stringify({ model, messages, max_completion_tokens: limit, reasoning_split: true, stream: !!onContent }),
       });
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) throw new AssistantError('provider', 'MiniMax 身份验证或访问权限失败。请检查 API Key、所选地区及模型权限。');
         if (response.status === 429) throw new AssistantError('provider', 'MiniMax 请求受限，请稍后重试，并检查账户额度及速率限制。');
         throw new AssistantError('provider', `MiniMax 请求失败（HTTP ${response.status}）。请检查模型设置或稍后重试。`);
       }
+      if (onContent) return await readMiniMaxStream(response, signal, onContent);
       const body = await response.text();
       if (body.length > 2_000_000) throw new AssistantError('provider', 'MiniMax response exceeded the size limit.');
       let data;

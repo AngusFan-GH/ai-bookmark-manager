@@ -47,6 +47,26 @@ globalThis.fetch = async (url, init) => {
  folders:context.mode==='recommend'?[]:[{proposalId:'new:synthetic',title:'Synthetic AI Folder',parentFolderId:folder.id}],
  moves:context.mode==='recommend'?[]:[{bookmarkId:bookmark.bookmarkId,targetFolderId:'new:synthetic',reason:'Synthetic move'}]};
  }
+ if(body.stream===true) {
+  const encoded=JSON.stringify(result);const prefix='{"text":"Synthetic ';let cancelled=false;
+  const encoder=new TextEncoder();
+  const stream=new ReadableStream({
+   start(controller) {
+    const event=value=>controller.enqueue(encoder.encode('data: '+JSON.stringify(value)+'\\n\\n'));
+    event({choices:[{index:0,delta:{content:prefix},finish_reason:null}]});
+    const finish=()=>{
+     if(cancelled)return false;
+     event({choices:[{index:0,delta:{content:encoded.slice(prefix.length)},finish_reason:null}]});
+     event({choices:[{index:0,delta:{},finish_reason:'stop'}]});
+     controller.enqueue(encoder.encode('data: [DONE]\\n\\n'));controller.close();return true;
+    };
+    if(globalThis.__mockMode==='stream-gated')globalThis.__releaseStream=finish;
+    else finish();
+   },
+   cancel(){cancelled=true;},
+  });
+  return new Response(stream,{status:200,headers:{'content-type':'text/event-stream'}});
+ }
  return new Response(JSON.stringify({choices:[{message:{role:'assistant',content:JSON.stringify(result)},finish_reason:'stop'}]}),{status:200,headers:{'content-type':'application/json'}});
 };
 `;
@@ -87,15 +107,29 @@ async function choose(input, checked=true) {
  if(await input.isChecked() !== checked) await input.locator('xpath=ancestor::label[1]').click();
  assert.equal(await input.isChecked(),checked,'Visible label must update native checked state');
 }
-async function screenshot(name) {
+async function screenshot(name,target=page,fullPage=true) {
  checkpoint('screenshot: '+name);
- // Playwright fast-forwards finite animations and temporarily cancels infinite
- // animations for this capture. Awaiting every Animation.finished promise can
- // hang after a prior capture/resize leaves an animation paused or idle.
- // Keep the separate visible-toast check and all geometry/action assertions.
- await eventually(async()=>assert.equal(await page.locator('.el-message:visible').count(),0));
- await page.screenshot({path:path.join(artifactDir,name+'.png'),fullPage:true,animations:'disabled',timeout:10000});
+ // Poll state rather than awaiting Animation.finished: paused/idle animations
+ // need never resolve. Do not mutate animations while Chromium captures a
+ // resizing dialog; that caused transient Page.captureScreenshot failures.
+ await target.waitForFunction(()=>document.getAnimations().every(animation=>
+  animation.playState!=='running'||animation.effect?.getTiming().iterations===Infinity),{},{timeout:5000});
+ await eventually(async()=>assert.equal(await target.locator('.el-message:visible').count(),0));
+ const settle=()=>bounded(target.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())))),2000,'screenshot render frames');
+ await settle();
+ try {
+  await target.screenshot({path:path.join(artifactDir,name+'.png'),fullPage,timeout:10000});
+ } catch(error) {
+  if(!String(error).includes('Page.captureScreenshot): Unable to capture screenshot'))throw error;
+  // One retry for this specific browser capture race; failed assertions and
+  // missing UI are never retried or suppressed here.
+  console.warn('Retrying transient screenshot capture:',name);
+  await writeFile(path.join(artifactDir,name+'-capture-retry.json'),JSON.stringify({name,error:String(error)},null,2));
+  await settle();
+  await target.screenshot({path:path.join(artifactDir,name+'.png'),fullPage,timeout:10000});
+ }
 }
+
 async function noBodyOverflow(label) {
  const dimensions=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,width:innerWidth}));
  assert(dimensions.scroll<=dimensions.width+1,`${label}: unexpected page horizontal overflow ${JSON.stringify(dimensions)}`);
@@ -199,6 +233,11 @@ try {
  pass('native nested bookmarks synchronize to IndexedDB and UI; empty destination folder remains available');
  const goal=()=>page.getByRole('textbox',{name:'搜索书签或描述你的目标',exact:true});
  const browse=()=>page.getByRole('button',{name:/浏览书签/}).click();
+ const openTool=async name=>{
+  const tools=page.locator('details').filter({has:page.locator('summary').filter({hasText:'更多工具'})});
+  if(!await tools.evaluate(element=>element.open))await tools.locator('summary').click();
+  await tools.getByRole('button',{name,exact:true}).click();
+ };
  const search=async text=>{await goal().fill(text);await page.getByRole('button',{name:'本地搜索',exact:true}).click();await eventually(async()=>assert(!(await page.locator('.el-loading-mask:visible').count())));};
  const closeDialog=dialog=>dialog.getByRole('button',{name:'Close this dialog',exact:true}).click();
  const approve=async(deletion=false)=>{
@@ -279,15 +318,26 @@ try {
  await worker.evaluate(()=>{globalThis.__mockCalls=[];});
  checkpoint('two-turn conversation and history');
  // No backend-generated session or turn: the real goal composer creates and sends both turns.
+ await worker.evaluate(()=>{globalThis.__mockMode='stream-gated';});
  await goal().fill('Organize Synthetic Guide');await page.getByRole('button',{name:'询问 AI',exact:true}).click();
+ const provisional=page.getByRole('article',{name:'正在生成的回复',exact:true});
+ await provisional.getByText('Synthetic',{exact:true}).waitFor();
+ assert.equal(await provisional.locator('a,button,.message-references').count(),0);
+ assert.equal(await page.getByRole('button',{name:'审核整理建议（1）',exact:true}).count(),0);
+ assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.at(-1).stream),true);
+ await screenshot('conversation-streaming-partial');
+ assert.equal(await worker.evaluate(()=>globalThis.__releaseStream()),true);
  await page.getByText('Synthetic answer 1',{exact:true}).waitFor();
+ await provisional.waitFor({state:'hidden'});
+ await worker.evaluate(()=>{globalThis.__mockMode='ok';});
+ pass('streaming renders real provisional text before validated references or action controls; final reply replaces the preview');
  await goal().fill('Keep the same reference and explain it');await page.getByRole('button',{name:'继续对话',exact:true}).click();
  await page.getByText('Synthetic answer 2',{exact:true}).waitFor();
  const sessions=await request('ASSISTANT_SESSIONS');const session=await request('ASSISTANT_GET',{sessionId:sessions[0].id});
  assert.equal(session.messages.length,4);assert.equal(session.messages[1].references[0].citationId,session.messages[3].references[0].citationId);
  assert.equal(session.citations[0].url,'https://example.test/guide?Original=YES#frag');
  const calls=await worker.evaluate(()=>globalThis.__mockCalls);assert.equal(calls.length,2);assert.equal(calls[1].messages.length,4);
- await page.reload();await eventually(async()=>assert.equal(await goal().inputValue(),''));await page.getByRole('button',{name:'历史与恢复',exact:true}).click();
+ await page.reload();await eventually(async()=>assert.equal(await goal().inputValue(),''));await openTool('历史与恢复');
  await page.getByRole('button',{name:/Organize Synthetic Guide/}).click();await page.getByRole('dialog',{name:'历史与恢复',exact:true}).waitFor({state:'hidden'});
  assert.equal(await page.getByRole('dialog',{name:'切换对话',exact:true}).count(),0);await page.getByText('Synthetic answer 2',{exact:true}).waitFor();
  pass('visible two-turn AI composer retains full context, exact URL, stable citation and history after reload');
@@ -319,10 +369,10 @@ try {
  await page.getByRole('button',{name:'检查完全相同的 URL',exact:true}).click();
  await page.getByText('当前范围没有完全相同的 URL，无需清理。',{exact:true}).waitFor();
  pass('inline duplicate selection keeps one copy; exact typed deletion gate and explicit zero-result state work');
- await browse();await page.getByRole('button',{name:'目录',exact:true}).click();
+ await browse();await page.getByRole('button',{name:'选择目录',exact:true}).click();
  await page.getByRole('dialog',{name:'我的书签目录',exact:true}).getByText(ids.rootTitle,{exact:true}).click();
  await page.getByRole('button',{name:/整理书签/}).click();assert.equal(await page.locator('.duplicates-section').count(),0);
- await page.getByRole('button',{name:'目录',exact:true}).click();await page.getByRole('button',{name:'▤ 全部书签',exact:true}).click();
+ await browse();await page.getByRole('button',{name:'选择目录',exact:true}).click();await page.getByRole('button',{name:'▤ 全部书签',exact:true}).click();
  pass('changing directory invalidates previous duplicate results');
  checkpoint('manual bookmark editor');
  // Ordinary add/edit/move controls also use the exact same safe plan review.
@@ -343,7 +393,7 @@ try {
  checkpoint('tools and import recovery');
  // Local search and tools have separate state. Import recovery uses the file chooser and visible approval.
  await search('Synthetic Guide');await page.getByRole('link',{name:'Synthetic Guide ↗',exact:true}).waitFor();
- await page.getByRole('button',{name:'导入 / 导出',exact:true}).click();
+ await openTool('导入 / 导出');
  const toolsDialog=page.getByRole('dialog',{name:'书签工具',exact:true});await toolsDialog.waitFor();
  assert.equal(await page.locator('.results-panel tbody tr').count(),1);
  assert((await page.locator('.results-panel tbody').innerText()).includes('Synthetic Guide'));
@@ -351,7 +401,7 @@ try {
  pass('opening and closing tools preserves local search and the main result table');
  // Delete only this run's synthetic source to prove nested additive recovery from the exported snapshot.
  await native(id=>chrome.bookmarks.removeTree(id),ids.source);await request('SYNC');
- await page.getByRole('button',{name:'导入 / 导出',exact:true}).click();
+ await openTool('导入 / 导出');
  await toolsDialog.getByRole('button',{name:'导入 JSON 备份',exact:true}).click();
  let importDialog=page.getByRole('dialog',{name:'导入 JSON 备份',exact:true});
  const chooseBackup=async()=>{const chooser=page.waitForEvent('filechooser');await importDialog.getByRole('button',{name:/^(选择文件|更换文件)$/}).click();await(await chooser).setFiles(backupPath);await importDialog.locator('.preview-card').waitFor();};
@@ -374,7 +424,7 @@ try {
  checkpoint('link-health rendering');
  // Safe health rendering without running any external scan.
  await native(async root=>{await chrome.bookmarks.create({parentId:root,title:'Synthetic unsafe protocol',url:'javascript:void(0)'});},ids.root);await request('SYNC');
- await page.getByRole('button',{name:'链接健康',exact:true}).click();
+ await openTool('链接健康');
  await toolsDialog.getByText('javascript:void(0)',{exact:true}).waitFor();
  assert.equal(await toolsDialog.locator('a[href^="javascript:"],a[href^="data:"]').count(),0);
  for(const width of [390,768,1024,1440]){await page.setViewportSize({width,height:1000});await noBodyOverflow('health '+width);await reachable(toolsDialog.getByRole('button',{name:'返回工作台',exact:true}),'health close '+width);await screenshot('health-'+width);}
@@ -394,10 +444,17 @@ try {
  await worker.evaluate(()=>{globalThis.__mockMode='error';});await goal().fill('Synthetic retry request');
  await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await page.getByText('AI 请求暂时受限，请稍后重试，并检查服务账户的额度与调用频率。',{exact:true}).waitFor();assert.equal(await goal().inputValue(),'Synthetic retry request');
  const beforeCancelCalls=await worker.evaluate(()=>globalThis.__mockCalls.length);
- await worker.evaluate(()=>{globalThis.__mockMode='wait';});await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();
+ await worker.evaluate(()=>{globalThis.__mockMode='stream-gated';});await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();
  await eventually(async()=>assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),beforeCancelCalls+1));
+ await provisional.getByText('Synthetic',{exact:true}).waitFor();
+ const historyBeforeCancel=await request('ASSISTANT_SESSIONS');
  await page.getByRole('button',{name:'取消生成',exact:true}).click();await eventually(async()=>assert(!(await goal().isDisabled())));
  assert.equal(await goal().inputValue(),'Synthetic retry request');
+ await provisional.waitFor({state:'hidden'});
+ await worker.evaluate(()=>globalThis.__releaseStream());
+ assert.deepEqual(await request('ASSISTANT_SESSIONS'),historyBeforeCancel);
+ assert.equal(await provisional.count(),0);
+ await screenshot('conversation-stream-cancelled');
  await worker.evaluate(()=>{globalThis.__mockMode='ok';});await page.getByRole('button',{name:/^(询问 AI|继续对话)$/}).click();await eventually(async()=>assert.equal(await goal().inputValue(),''));
  pass('visible provider error and cancellation preserve the prompt; retry completes successfully');
  checkpoint('selected bookmark scope');
@@ -443,14 +500,14 @@ try {
  await nativePopupLayout(unavailablePopup,'popup-unavailable-page');
  assert.equal(await unavailablePopup.locator('button.primary').count(),0);
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),unavailableCalls);
- await unavailablePopup.screenshot({path:path.join(artifactDir,'popup-unavailable-page.png'),animations:'disabled',timeout:10000});
+ await screenshot('popup-unavailable-page',unavailablePopup,false);
  await unavailablePopup.close();
  pass('native unsupported-page popup retains readable width and headings without capture or provider calls');
  await sourcePage.goto('https://example.test/capture?Keep=YES#frag');
  const popup=await openNativePopup();
  await popup.getByRole('button',{name:'采用标题',exact:true}).waitFor();
  await nativePopupLayout(popup,'popup-unsaved-page');
- await popup.screenshot({path:path.join(artifactDir,'popup-unsaved-inline-advice.png')});
+ await screenshot('popup-unsaved-inline-advice',popup,false);
  assert.equal(await popup.getByLabel('标题',{exact:true}).inputValue(),'Synthetic capture page');
  const originalFolder=await popup.getByLabel('保存到',{exact:true}).inputValue();
  assert.notEqual(originalFolder,ids.target);
@@ -468,7 +525,7 @@ try {
  await popup.getByRole('searchbox',{name:'搜索已有书签',exact:true}).fill('Synthetic Quick Save');
  await popup.getByRole('button',{name:/Synthetic Quick Save.*example\.test/}).waitFor();
  const quick=(await native(()=>chrome.bookmarks.search({title:'Synthetic Quick Save'})))[0];assert.equal(quick.url,'https://example.test/capture?Keep=YES#frag');
- await popup.screenshot({path:path.join(artifactDir,'popup-quick-save.png')});
+ await screenshot('popup-quick-save',popup,false);
  pass('real extension action popup saves the active synthetic page and finds it through local search');
  await popup.close();
  // Create another native copy without requesting SYNC. Capture status must read
@@ -489,7 +546,7 @@ try {
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeExisting);
  assert.equal(await existingPopup.locator('.inline-suggestion').count(),0);
  assert.equal((await native(()=>chrome.bookmarks.search({url:'https://example.test/capture?Keep=YES#frag'}))).length,2);
- await existingPopup.screenshot({path:path.join(artifactDir,'popup-existing-locations.png')});
+ await screenshot('popup-existing-locations',existingPopup,false);
  pass('reopened native popup shows both saved locations without explicit index sync and offers view/edit with zero automatic AI calls');
  await existingPopup.close();
  // A failed authoritative membership read must not be interpreted as unsaved.
@@ -502,12 +559,12 @@ try {
  await unknownPopup.waitForTimeout(1200);
  assert.equal(await worker.evaluate(()=>globalThis.__mockCalls.length),callsBeforeUnknown);
  assert.equal(await unknownPopup.locator('.inline-suggestion').count(),0);
- await unknownPopup.screenshot({path:path.join(artifactDir,'popup-lookup-error.png')});
+ await screenshot('popup-lookup-error',unknownPopup,false);
  await worker.evaluate(()=>{chrome.bookmarks.getTree=globalThis.__realGetTree;delete globalThis.__realGetTree;});
  await unknownPopup.getByRole('button',{name:'重新检查',exact:true}).click();
  await unknownPopup.getByRole('button',{name:'采用标题',exact:true}).waitFor();
  assert.equal((await native(()=>chrome.bookmarks.search({url:'https://example.test/unknown-capture'}))).length,0);
- await unknownPopup.screenshot({path:path.join(artifactDir,'popup-lookup-recovered.png')});
+ await screenshot('popup-lookup-recovered',unknownPopup,false);
  await unknownPopup.close();
  pass('native lookup retry recovers inline advice without saving a bookmark');
  pass('failed native capture lookup pauses automatic advice instead of treating unknown status as a new bookmark');

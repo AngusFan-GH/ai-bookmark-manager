@@ -17,10 +17,10 @@ async function flush(){for(let i=0;i<12;i++)await nextTick();await new Promise(r
 function button(text:string){const result=[...host.querySelectorAll('button')].find(item=>item.textContent?.trim()===text);expect(result,`button ${text}`).toBeTruthy();return result!;}
 async function click(text:string){button(text).click();await flush();}
 function setInput(input:HTMLInputElement|HTMLTextAreaElement,value:string){input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}
-function mount(){host=document.createElement('div');document.body.append(host);app=createApp(Workspace);for(const name of ['ElTag','ElEmpty','ElForm','ElFormItem','ElTree','ElPagination','ElInputNumber'])app.component(name,passthrough);app.component('ElAlert',defineComponent({props:['title'],setup(props){return()=>h('p',props.title);}}));app.component('ElButton',defineComponent({props:['disabled','loading','nativeType'],setup(props,{slots}){return()=>h('button',{disabled:!!props.disabled||!!props.loading,type:props.nativeType||'button'},slots.default?.());}}));
+function mount(){host=document.createElement('div');document.body.append(host);app=createApp(Workspace);for(const name of ['ElTag','ElEmpty','ElForm','ElFormItem','ElTree','ElPagination','ElInputNumber'])app.component(name,passthrough);app.component('ElAlert',defineComponent({props:['title'],setup(props){return()=>h('p',props.title);}}));app.component('ElButton',defineComponent({props:['disabled','loading','nativeType','type'],setup(props,{slots}){return()=>h('button',{'data-variant':props.type,disabled:!!props.disabled||!!props.loading,type:props.nativeType||'button'},slots.default?.());}}));
 const overlay=defineComponent({props:['modelValue'],setup(props,{slots}){return()=>props.modelValue?h('section',[slots.default?.(),slots.footer?.()]):null;}});app.component('ElDialog',overlay);app.component('ElDrawer',overlay);
 app.component('ElInput',defineComponent({props:['modelValue','type','disabled'],emits:['update:modelValue'],setup(props,{emit,attrs}){return()=>h(props.type==='textarea'?'textarea':'input',{...attrs,type:props.type,value:props.modelValue,disabled:props.disabled,onInput:(event:Event)=>emit('update:modelValue',(event.target as HTMLInputElement).value)});}}));
-app.component('ElSelect',defineComponent({props:['modelValue','disabled'],emits:['update:modelValue','change'],setup(props,{slots,emit,attrs}){return()=>h('select',{...attrs,value:props.modelValue,disabled:props.disabled,onChange:(event:Event)=>{const value=(event.target as HTMLSelectElement).value;emit('update:modelValue',value);emit('change',value);}},slots.default?.());}}));app.component('ElOption',defineComponent({props:['value','label','disabled'],setup(props){return()=>h('option',{value:props.value,disabled:props.disabled},props.label);}}));
+app.component('ElSelect',defineComponent({props:['modelValue','disabled','multiple'],emits:['update:modelValue','change'],setup(props,{slots,emit,attrs}){return()=>h('select',{...attrs,value:props.modelValue,disabled:props.disabled,multiple:props.multiple,onChange:(event:Event)=>{const select=event.target as HTMLSelectElement;const value=props.multiple?[...select.selectedOptions].map(option=>option.value):select.value;emit('update:modelValue',value);emit('change',value);}},slots.default?.());}}));app.component('ElOption',defineComponent({props:['value','label','disabled'],setup(props){return()=>h('option',{value:props.value,disabled:props.disabled},props.label);}}));
 app.component('ElCheckboxGroup',defineComponent({props:['modelValue','disabled'],emits:['update:modelValue'],setup(props,{slots,emit}){provide('checks',{values:computed(()=>props.modelValue),disabled:computed(()=>props.disabled),toggle:(value:string,checked:boolean)=>emit('update:modelValue',checked?[...props.modelValue,value]:props.modelValue.filter((item:string)=>item!==value))});return()=>h('div',slots.default?.());}}));app.component('ElCheckbox',defineComponent({props:['modelValue','value','disabled'],emits:['update:modelValue'],setup(props,{slots,emit}){const group=inject<{values:ComputedRef<string[]>;disabled:ComputedRef<boolean>;toggle:(value:string,checked:boolean)=>void}|undefined>('checks',undefined);return()=>h('label',[h('input',{type:'checkbox',checked:group?group.values.value.includes(props.value):props.modelValue,disabled:props.disabled||group?.disabled.value,onChange:(event:Event)=>{const checked=(event.target as HTMLInputElement).checked;if(group)group.toggle(props.value,checked);else emit('update:modelValue',checked);}}),slots.default?.()]);}}));
 app.component('ElTable',defineComponent({props:['data'],emits:['selection-change'],setup(props,{slots,emit}){provide('rows',computed(()=>props.data));return()=>h('div',[h('button',{onClick:()=>emit('selection-change',props.data)},'Select fixture rows'),slots.default?.()]);}}));app.component('ElTableColumn',defineComponent({setup(_,{slots}){const rows=inject<ComputedRef<BookmarkRecord[]>>('rows');return()=>h('div',(rows?.value??[]).map(row=>slots.default?.({row})));}}));app.directive('loading',{});app.mount(host);}
 beforeEach(()=>{vi.clearAllMocks();window.history.replaceState(null,'','/');state=reactive({rows:[bookmark()],folders:[{id:'root',browserId:'root',parentId:null,title:'',path:'',index:0,updatedAt:1,syncGeneration:1},{id:'bar',browserId:'bar',parentId:'root',title:'Bookmarks bar',path:'Bookmarks bar',index:0,updatedAt:1,syncGeneration:1}],stats:{bookmarks:1,lastSync:1},total:1,loading:false,error:''});mocks.getAssistantSettings.mockResolvedValue({region:'global',model:'MiniMax-M2.5',hasKey:false,consent:false,keyStorage:'session'});mocks.completeOnboarding.mockResolvedValue(undefined);mocks.cancelAdvice.mockResolvedValue(undefined);mocks.cancelTurn.mockResolvedValue(undefined);mocks.listSessions.mockResolvedValue([]);mocks.listHistory.mockResolvedValue([]);mocks.load.mockResolvedValue(undefined);mocks.prepareOrganization.mockResolvedValue(draft());mocks.analyzeDuplicates.mockResolvedValue({groups:[]});mocks.confirm.mockResolvedValue(true);mocks.permission.mockResolvedValue(true);vi.stubGlobal('chrome',{permissions:{request:mocks.permission}});});
@@ -36,7 +36,7 @@ describe('integrated main workspace interactions',()=>{
 });
 
 const configured={region:'global',model:'MiniMax-M2.5',hasKey:true,consent:true,keyStorage:'session',autoSuggestions:true,connectionTested:true,onboardingCompleted:true};
-const autoResult={id:'auto-session',mode:'recommend',scope:{},messages:[{id:'reply',role:'assistant',text:'Automatic useful suggestion'}],citations:[]};
+const autoResult={id:'auto-session',revision:3,mode:'recommend',scope:{},messages:[{id:'reply',role:'assistant',text:'Automatic useful suggestion'}],citations:[]};
 async function waitAutomatic(){await new Promise(resolve=>setTimeout(resolve,850));await flush();}
 describe('first-use guidance and proactive workspace advice',()=>{
  it('shows onboarding once, lets the user skip and keeps local search usable',async()=>{mocks.getAssistantSettings.mockResolvedValue({...configured,hasKey:false,consent:false,autoSuggestions:false,connectionTested:false,onboardingCompleted:false});mount();await flush();expect(host.textContent).toContain('先连接 MiniMax');await click('稍后配置，先用本地功能');expect(mocks.completeOnboarding).toHaveBeenCalledTimes(1);expect(host.textContent).not.toContain('先连接 MiniMax');expect(mocks.sendTurn).not.toHaveBeenCalled();await click('AI 设置');expect(button('保存并测试连接')).toBeTruthy();});
@@ -115,4 +115,99 @@ describe('capture destination handoff',()=>{
 it('does not mislabel a completion failure as a failed connection after the test succeeded',async()=>{
  mocks.getAssistantSettings.mockResolvedValue({...configured,onboardingCompleted:false});mocks.testAssistantConnection.mockResolvedValue(configured);mocks.completeOnboarding.mockRejectedValueOnce(new Error('Storage unavailable'));mount();await flush();await click('保存并测试连接');
  expect(host.querySelector('.settings-feedback')?.textContent).toContain('连接测试已通过，但未能完成引导');expect(host.textContent).not.toContain('连接测试未通过');expect(button('稍后配置，先用本地功能').disabled).toBe(false);expect(mocks.testAssistantConnection).toHaveBeenCalledTimes(1);
+});
+
+
+describe('first-principles task hierarchy',()=>{
+ it('makes local search the single primary prompt action without requiring AI setup',async()=>{
+  mount();await flush();const primary=host.querySelectorAll('.goal-form button[data-variant="primary"]');
+  expect(primary).toHaveLength(1);expect(primary[0].textContent).toBe('本地搜索');
+  expect(host.textContent).not.toContain('帮我挑选值得读的');
+  expect(host.querySelector('.header-actions')?.textContent).not.toContain('目录');
+ });
+ it('keeps maintenance discoverable in one closed disclosure and returns to the same workspace',async()=>{
+  mount();await flush();const menu=host.querySelector('details.utility-menu') as HTMLDetailsElement;
+  expect(menu.open).toBe(false);expect(menu.querySelector('summary')?.textContent).toBe('更多工具');
+  for(const name of ['历史与恢复','导入 / 导出','链接健康','刷新原生书签'])expect(menu.textContent).toContain(name);
+  menu.open=true;await click('导入 / 导出');expect(host.textContent).toContain('Tools');await click('返回工作台');
+  expect(host.textContent).not.toContain('Tools');expect(host.querySelector('[aria-label="浏览书签"]')).not.toBeNull();
+  expect(mocks.sendTurn).not.toHaveBeenCalled();expect(mocks.prepareOrganization).not.toHaveBeenCalled();
+ });
+ it('keeps optional content actions out of the default selection controls while retaining explicit access',async()=>{
+  mount();await flush();await click('Select fixture rows');const details=host.querySelector('details.content-tools') as HTMLDetailsElement;
+  expect(details.open).toBe(false);expect(details.querySelector('summary')?.textContent).toBe('页面内容（可选）');
+  expect(details.textContent).toContain('读取内容');expect(details.textContent).toContain('内容状态');
+  expect(button('移动所选').closest('details')).toBeNull();expect(button('预览删除').closest('details')).toBeNull();
+  expect(mocks.fetchContent).not.toHaveBeenCalled();expect(mocks.permission).not.toHaveBeenCalled();
+ });
+ it('makes continuing a conversation primary and sends a form submission to that conversation',async()=>{
+  mocks.getAssistantSettings.mockResolvedValue({...configured,autoSuggestions:false});
+  mocks.createSession.mockResolvedValue({...autoResult,messages:[]});mocks.sendTurn.mockResolvedValue(autoResult);
+  mount();await flush();setInput(host.querySelector('textarea')!,'Find a useful source');await flush();await click('询问 AI');
+  const primary=host.querySelectorAll('.goal-form button[data-variant="primary"]');expect(primary).toHaveLength(1);expect(primary[0].textContent).toBe('继续对话');
+  setInput(host.querySelector('textarea')!,'Compare those sources');await flush();host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await flush();
+  expect(mocks.sendTurn).toHaveBeenLastCalledWith('auto-session','Compare those sources',expect.objectContaining({signal:expect.any(AbortSignal),onText:expect.any(Function)}));expect(host.querySelector('[aria-label="AI 多轮对话"]')).not.toBeNull();
+ });
+});
+
+describe('streaming conversation presentation',()=>{
+ type StreamOptions={expectedRevision:number;signal:AbortSignal;onText:(text:string)=>void};
+ async function begin(){mocks.getAssistantSettings.mockResolvedValue({...configured,autoSuggestions:false});mocks.createSession.mockResolvedValue({...autoResult,messages:[]});mount();await flush();setInput(host.querySelector('textarea')!,'Compare my saved sources');await flush();await click('询问 AI');}
+ it('renders real partial text before completion, but exposes references and actions only from the final session',async()=>{
+  let stream!:StreamOptions;let finish!:(result:unknown)=>void;
+  mocks.sendTurn.mockImplementationOnce((_id,_text,options)=>{stream=options;return new Promise(resolve=>finish=resolve);});await begin();
+  expect(host.querySelector('[aria-label="正在发送的问题"]')?.textContent).toContain('Compare my saved sources');
+  stream.onText('The first source');await flush();expect(host.querySelector('[aria-label="正在生成的回复"]')?.textContent).toContain('The first source');
+  stream.onText('The first source is useful.');await flush();expect(host.querySelector('.streaming-message .message-text')?.textContent).toBe('The first source is useful.');
+  expect(host.querySelector('[aria-label="本轮来源引用"]')).toBeNull();expect(host.querySelector('.suggestion-button')).toBeNull();expect(mocks.prepareOrganization).not.toHaveBeenCalled();
+  finish({...autoResult,messages:[{id:'final',role:'assistant',text:'The first source is useful.',references:[{citationId:'B1',title:'Source',url:'https://example.test/1',path:'Books',reason:'Relevant'}],moves:[{bookmarkId:'b1',targetFolderId:'bar',reason:'Useful'}]}]});await flush();
+  expect(host.querySelector('.streaming-message')).toBeNull();expect(host.querySelector('[aria-label="本轮来源引用"]')).not.toBeNull();expect(host.querySelector('.suggestion-button')).not.toBeNull();expect((host.querySelector('textarea')! as HTMLTextAreaElement).value).toBe('');
+  stream.onText('late event');await flush();expect(host.textContent).not.toContain('late event');
+ });
+ it('stops the request, drops partial output, preserves the question and ignores late callbacks',async()=>{
+  let stream!:StreamOptions;
+  mocks.sendTurn.mockImplementationOnce((_id,_text,options)=>{stream=options;return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('canceled')),{once:true}));});await begin();
+  stream.onText('Unfinished reply');await flush();await click('取消生成');
+  expect(stream.signal.aborted).toBe(true);expect(host.querySelector('.streaming-message')).toBeNull();expect(host.textContent).toContain('已停止生成');expect((host.querySelector('textarea')! as HTMLTextAreaElement).value).toBe('Compare my saved sources');
+  stream.onText('Stale reply');await flush();expect(host.textContent).not.toContain('Stale reply');expect(button('继续对话').disabled).toBe(false);expect(mocks.prepareOrganization).not.toHaveBeenCalled();
+ });
+ it('keeps failed partial turns out of history and leaves a retryable draft',async()=>{
+  let stream!:StreamOptions;let fail!:(error:Error)=>void;
+  mocks.sendTurn.mockImplementationOnce((_id,_text,options)=>{stream=options;return new Promise((_resolve,reject)=>fail=reject);});await begin();stream.onText('Incomplete answer');await flush();fail(new Error('provider unavailable'));await flush();
+  expect(host.querySelector('.streaming-message')).toBeNull();expect(host.textContent).not.toContain('Incomplete answer');expect((host.querySelector('textarea')! as HTMLTextAreaElement).value).toBe('Compare my saved sources');expect(button('继续对话').disabled).toBe(false);
+  mocks.sendTurn.mockResolvedValueOnce({...autoResult,messages:[{id:'retry',role:'assistant',text:'Complete retry answer'}]});await click('继续对话');expect(host.textContent).toContain('Complete retry answer');
+ });
+ it('waits for the stop outcome and accepts a turn that committed before cancellation',async()=>{
+  let stream!:StreamOptions;let finish!:(result:unknown)=>void;
+  mocks.sendTurn.mockImplementationOnce((_id,_text,options)=>{stream=options;return new Promise(resolve=>finish=resolve);});await begin();
+  expect(stream.expectedRevision).toBe(3);stream.onText('Pending reply');await flush();await click('取消生成');
+  expect(stream.signal.aborted).toBe(true);expect(host.textContent).toContain('正在停止并核对保存状态');expect(host.textContent).not.toContain('已停止生成');expect(button('取消生成').disabled).toBe(true);expect(host.querySelector('.streaming-message')).toBeNull();
+  finish({...autoResult,revision:4,messages:[{id:'saved-before-stop',role:'assistant',text:'Committed complete answer'}]});await flush();
+  expect(host.textContent).toContain('Committed complete answer');expect(host.textContent).toContain('回答已在停止前完成');expect((host.querySelector('textarea')! as HTMLTextAreaElement).value).toBe('');expect(host.textContent).not.toContain('已停止生成');
+ });
+ it('does not claim safe cancellation on reconciliation failure and requires review before retry',async()=>{
+  let fail!:(error:Error)=>void;mocks.sendTurn.mockImplementationOnce(()=>new Promise((_resolve,reject)=>fail=reject));await begin();await click('取消生成');
+  fail(new Error('无法确认本次回答是否已保存，请重新打开对话核对后再发送。'));await flush();
+  expect(host.textContent).toContain('无法确认本次回答是否已保存');expect(host.textContent).not.toContain('已停止生成');expect(button('继续对话').disabled).toBe(true);expect((host.querySelector('textarea')! as HTMLTextAreaElement).value).toBe('Compare my saved sources');
+  host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await flush();expect(mocks.sendTurn).toHaveBeenCalledTimes(1);
+  mocks.getSession.mockRejectedValueOnce(new Error('offline'));await click('重新核对当前对话');expect(button('继续对话').disabled).toBe(true);
+  mocks.getSession.mockResolvedValueOnce({...autoResult,revision:4,messages:[{id:'reconciled',role:'assistant',text:'Saved latest reply'}]});await click('重新核对当前对话');
+  expect(host.textContent).toContain('Saved latest reply');expect(host.textContent).toContain('请先核对回复');expect(button('继续对话').disabled).toBe(false);
+  mocks.sendTurn.mockResolvedValueOnce({...autoResult,revision:5});await click('继续对话');expect(mocks.sendTurn).toHaveBeenLastCalledWith('auto-session','Compare my saved sources',expect.objectContaining({expectedRevision:4}));
+ });
+ it('clears an unresolved-turn block when privacy changes deliberately start a new context',async()=>{
+  mocks.sendTurn.mockRejectedValueOnce(new Error('无法确认本次回答是否已保存，请重新打开对话核对后再发送。'));await begin();expect(button('继续对话').disabled).toBe(true);
+  await click('AI 设置');const excluded=host.querySelector('select[aria-label="排除的 AI 目录"]')! as HTMLSelectElement;excluded.value='bar';excluded.dispatchEvent(new Event('change'));await flush();await click('保存设置');
+  expect(button('询问 AI').disabled).toBe(false);expect(host.textContent).not.toContain('重新核对当前对话');expect(host.textContent).not.toContain('正在停止');
+ });
+ it('clears an unresolved-turn block when deliberately opening a completed automatic suggestion',async()=>{
+  mocks.getAssistantSettings.mockResolvedValue(configured);mocks.createSession.mockResolvedValue({...autoResult,messages:[]});mocks.sendTurn.mockRejectedValueOnce(new Error('无法确认本次回答是否已保存，请重新打开对话核对后再发送。'));
+  mount();await flush();setInput(host.querySelector('textarea')!,'Find sources');await flush();await click('询问 AI');expect(button('继续对话').disabled).toBe(true);
+  mocks.sendTurn.mockResolvedValueOnce(autoResult);await click('本地搜索');await waitAutomatic();await click('查看建议详情');
+  expect(button('继续对话').disabled).toBe(false);expect(host.textContent).not.toContain('重新核对当前对话');
+ });
+ it('aborts when the workspace closes and suppresses stale text callbacks',async()=>{
+  let stream!:StreamOptions;mocks.sendTurn.mockImplementationOnce((_id,_text,options)=>{stream=options;return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('canceled')),{once:true}));});await begin();app!.unmount();app=undefined;
+  expect(stream.signal.aborted).toBe(true);stream.onText('Late after close');await flush();expect(host.textContent).not.toContain('Late after close');
+ });
 });

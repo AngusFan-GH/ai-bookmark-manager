@@ -32,13 +32,21 @@ export function createAssistantRepository(db:BookmarkDatabase):AssistantReposito
     },
     listFolders: () => db.folders.toArray(),
     async getSession(id) { return (await db.meta.get(SESSION_PREFIX+id))?.value as AssistantSession|undefined; },
-    async saveSession(session,expectedRevision) {
-      return db.transaction('rw',db.meta,async () => {
+    async saveSession(session,expectedRevision,signal) {
+      if(signal?.aborted) throw new Error('请求已停止');
+      let cancel = () => {};
+      try { return await db.transaction('rw',db.meta,async transaction => {
+        cancel = () => { try { transaction.abort(); } catch { /* A committed turn cannot be rolled back. */ } };
+        signal?.addEventListener('abort',cancel,{once:true});
+        if(signal?.aborted) {cancel();throw new Error('请求已停止');}
         const key = SESSION_PREFIX+session.id;
         const existing = (await db.meta.get(key))?.value as AssistantSession|undefined;
         if (expectedRevision === null ? !!existing : !existing || existing.revision !== expectedRevision) return false;
-        await db.meta.put({key,value:session,updatedAt:Date.now()}); return true;
-      });
+        if(signal?.aborted) throw new Error('请求已停止');
+        await db.meta.put({key,value:session,updatedAt:Date.now()});
+        if(signal?.aborted) throw new Error('请求已停止');
+        return true;
+      }); } finally {signal?.removeEventListener('abort',cancel);}
     },
   };
 }
@@ -84,6 +92,7 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     async listBookmarks(){return (await outboundRepository.listBookmarks()).map(({contentSnippet:_snippet,...metadata})=>metadata);}
   },provider});
   const controllers=new Map<string,AbortController>();
+  const settlements=new Map<string,Promise<void>>();
   let settingsMutation=false;
   let keyAccessBlocked=false;
   const trustedAreas=new WeakMap<object,Promise<void>>();
@@ -219,13 +228,17 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
     .register('ASSISTANT_SESSIONS',async () => (await db.meta.where('key').startsWith(SESSION_PREFIX).toArray())
       .map(row=>row.value as AssistantSession).sort((a,b)=>b.updatedAt-a.updatedAt).map(s=>({id:s.id,mode:s.mode,scope:s.scope,updatedAt:s.updatedAt,title:s.messages.find(m=>m.role==='user')?.text.slice(0,80)||'新任务'})))
     .register('ASSISTANT_CREATE',async req => sessionView(await service.createSession(req.input)))
-    .register('ASSISTANT_GET',async req => {const s=await repository.getSession(req.sessionId);if(!s) throw new Error('对话不存在');return sessionView(s);})
-    .register('ASSISTANT_TURN',async req => {
+    .register('ASSISTANT_GET',async req => {await settlements.get(req.sessionId);const s=await repository.getSession(req.sessionId);if(!s) throw new Error('对话不存在');return sessionView(s);})
+    .register('ASSISTANT_TURN',async (req,context) => {
       if(settingsMutation) throw new Error('模型设置正在更新，请稍后发送');
       if(controllers.has(req.sessionId)) throw new Error('该对话正在生成，请等待或停止');
       // Reserve before any async preflight so cancellation and settings changes
       // see the request throughout its lifetime, not only after key/permission reads.
       const controller=new AbortController();controllers.set(req.sessionId,controller);
+      let settle!:()=>void;settlements.set(req.sessionId,new Promise<void>(resolve=>{settle=resolve;}));
+      const cancel = () => controller.abort();
+      context?.signal?.addEventListener('abort', cancel, {once:true});
+      if(context?.signal?.aborted) controller.abort();
       try {
         const settings=await readSettings();
         if(req.automatic)assertAutomatic(settings);
@@ -258,8 +271,8 @@ export function registerWorkspaceHandlers(router:BackgroundRouter,{db,planServic
           }));
         }
         if(controller.signal.aborted)throw new Error('请求已取消');
-        return sessionView(await (req.automatic?automaticService():service).turn({sessionId:req.sessionId,text:req.text,settings,apiKey,signal:controller.signal}));
-      } finally {if(controllers.get(req.sessionId)===controller) controllers.delete(req.sessionId);}
+        return sessionView(await (req.automatic?automaticService():service).turn({sessionId:req.sessionId,text:req.text,settings,apiKey,signal:controller.signal,onText:context?.onText,requestId:req.requestId,expectedRevision:req.expectedRevision}));
+      } finally {context?.signal?.removeEventListener('abort',cancel);if(controllers.get(req.sessionId)===controller) {controllers.delete(req.sessionId);settlements.delete(req.sessionId);}settle();}
     })
     .register('ASSISTANT_CANCEL',async req => {controllers.get(req.sessionId)?.abort();})
     .register('ORGANIZATION_DUPLICATES',async req => {

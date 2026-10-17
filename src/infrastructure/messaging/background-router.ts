@@ -59,20 +59,22 @@ export interface RouterDeps {
  */
 type ByType<T extends BackgroundRequest['type']> = Extract<BackgroundRequest, { type: T }>;
 
+export interface RequestContext { signal?: AbortSignal; onText?: (text: string) => void }
+
 export class BackgroundRouter {
-  private readonly routes = new Map<BackgroundRequest['type'], (req: BackgroundRequest) => Promise<unknown>>();
+  private readonly routes = new Map<BackgroundRequest['type'], (req: BackgroundRequest, context?: RequestContext) => Promise<unknown>>();
 
   constructor(private readonly deps: RouterDeps) {}
 
   register<T extends BackgroundRequest['type'], R>(
     type: T,
-    handle: (req: ByType<T>) => Promise<R>,
+    handle: (req: ByType<T>, context?: RequestContext) => Promise<R>,
   ): this {
-    this.routes.set(type, handle as (req: BackgroundRequest) => Promise<unknown>);
+    this.routes.set(type, handle as (req: BackgroundRequest, context?: RequestContext) => Promise<unknown>);
     return this;
   }
 
-  async dispatch(raw: unknown): Promise<BackgroundResponse<unknown>> {
+  async dispatch(raw: unknown, context?: RequestContext): Promise<BackgroundResponse<unknown>> {
     const req = raw as BackgroundRequest;
     if (!req || typeof req !== 'object') {
       return err('?', { code: 'INVALID_REQUEST', message: 'request must be an object', retryable: false });
@@ -86,7 +88,7 @@ export class BackgroundRouter {
       return err(requestId, { code: 'INVALID_REQUEST', message: `unknown request type: ${req.type}`, retryable: false });
     }
     try {
-      const data = await handler(req);
+      const data = await handler(req, context);
       return ok(requestId, data);
     } catch (e) {
       const appErr: AppError = e instanceof AppErrorImpl ? e.toJSON() : toAppError(e);

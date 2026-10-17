@@ -14,6 +14,7 @@ export interface ProposedMove { bookmarkId: string; targetFolderId: string; reas
 export interface AssistantDisclosure { totalInScope: number; transmitted: number; omitted: number; metadataOnly: boolean; snippetLimit: number; transmittedFolders?: number; totalFoldersInScope?: number; queryExpansionUsed?: boolean }
 export interface AssistantMessage {
   id: string;
+  requestId?: string;
   role: 'user' | 'assistant';
   text: string;
   createdAt: number;
@@ -29,7 +30,7 @@ export interface ProviderMessage { role: 'system' | 'user' | 'assistant'; conten
 export interface AssistantSession {
   id: string; mode: AssistantMode; revision: number; scope: AssistantScope;
   messages: AssistantMessage[]; citations: Citation[]; providerHistory: ProviderMessage[];
-  createdAt: number; updatedAt: number;
+  createdAt: number; updatedAt: number; lastTurnRequestId?: string;
 }
 export type AssistantBookmark = BookmarkRecord & { contentSnippet?: string };
 export interface AssistantRepository {
@@ -38,9 +39,9 @@ export interface AssistantRepository {
   listFolders(): Promise<FolderRecord[]>;
   getSession(id: string): Promise<AssistantSession | undefined>;
   /** Atomic compare-and-set. null means insert only; false means revision conflict. */
-  saveSession(session: AssistantSession, expectedRevision: number | null): Promise<boolean>;
+  saveSession(session: AssistantSession, expectedRevision: number | null, signal?: AbortSignal): Promise<boolean>;
 }
-export interface ProviderRequest { messages: ProviderMessage[]; settings: AssistantSettings; apiKey: string; signal?: AbortSignal }
+export interface ProviderRequest { messages: ProviderMessage[]; settings: AssistantSettings; apiKey: string; signal?: AbortSignal; onContent?: (content: string) => void }
 export interface ProviderResult { message: ProviderMessage; finishReason: string }
 export interface AssistantProvider { complete(request: ProviderRequest): Promise<ProviderResult> }
 export class AssistantError extends Error {

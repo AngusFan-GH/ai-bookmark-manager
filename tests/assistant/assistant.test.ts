@@ -548,3 +548,52 @@ describe('bounded folder catalogs', () => {
     expect(result.targetFolderId).toBe('named-target'); expect(h.rows.size).toBe(0);
   });
 });
+
+describe('streamed turns commit only validated complete answers',()=>{
+  it('emits only provisional text, then commits both full messages and citations once',async()=>{
+    let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve;});
+    const onText=vi.fn();
+    const h=setup(undefined,undefined,{complete:async request=>{
+      request.onContent?.('{"text":"正在比较');
+      request.onContent?.('{"text":"正在比较书签","references":[{"bookmarkId":"a"');
+      await gate;return {message:output(['a'],{text:'正在比较书签'}),finishReason:'stop'};
+    }});
+    const s=await h.service.createSession({mode:'recommend'});const turn=h.service.turn({...input(s.id),onText});
+    await vi.waitFor(()=>expect(onText).toHaveBeenCalledWith('正在比较书签'));
+    expect(h.rows.get(s.id)?.messages).toEqual([]);expect(h.rows.get(s.id)?.providerHistory).toEqual([]);
+    expect(onText.mock.calls.flat().join('')).not.toContain('bookmarkId');
+    finish();const result=await turn;expect(result.messages).toHaveLength(2);expect(result.providerHistory).toHaveLength(2);expect(result.messages[1].references).toHaveLength(1);
+  });
+  it.each([{references:[{bookmarkId:'unknown',reason:'bad'}]},{moves:[{bookmarkId:'a',targetFolderId:'unknown',reason:'bad'}]},{unknown:true}])('rejects invalid final schema/IDs after preview without saving %#',async extra=>{
+    const h=setup(undefined,undefined,{complete:async request=>{request.onContent?.('{"text":"正在查找');return {message:output(['a'],extra),finishReason:'stop'};}});
+    const s=await h.service.createSession({mode:'assist'});const onText=vi.fn();
+    await expect(h.service.turn({...input(s.id),onText})).rejects.toMatchObject({code:'validation'});
+    expect(onText).toHaveBeenCalled();expect(h.rows.get(s.id)?.messages).toEqual([]);expect(h.rows.get(s.id)?.providerHistory).toEqual([]);
+  });
+  it('ignores late callbacks and results after cancellation, and a new turn remains usable',async()=>{
+    let oldRequest!:ProviderRequest;let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve;});let calls=0;
+    const h=setup(undefined,undefined,{complete:async request=>{calls++;if(calls===1){oldRequest=request;request.onContent?.('{"text":"正在查找');await gate;}return {message:output(),finishReason:'stop'};}});
+    const s=await h.service.createSession({mode:'recommend'});const controller=new AbortController();const onText=vi.fn();
+    const pending=h.service.turn({...input(s.id),signal:controller.signal,onText});
+    await vi.waitFor(()=>expect(onText).toHaveBeenCalled());controller.abort();await expect(pending).rejects.toMatchObject({code:'canceled'});
+    onText.mockClear();oldRequest.onContent?.('{"text":"过期内容"}');finish();await Promise.resolve();expect(onText).not.toHaveBeenCalled();
+    expect(h.rows.get(s.id)?.messages).toEqual([]);
+    const result=await h.service.turn({...input(s.id,'Retry explicitly'),onText});expect(result.messages).toHaveLength(2);expect(result.providerHistory).toHaveLength(2);expect(calls).toBe(2);
+  });
+});
+
+
+describe('stream turn terminal ownership',()=>{
+ it('records the request ID and refuses stale revision retries before another provider call',async()=>{
+  const h=setup();const session=await h.service.createSession({mode:'assist'});
+  const result=await h.service.turn({...input(session.id),requestId:'r1',expectedRevision:0,onText:()=>{}});expect(result.lastTurnRequestId).toBe('r1');
+  await expect(h.service.turn({...input(session.id),requestId:'r2',expectedRevision:0,onText:()=>{}})).rejects.toMatchObject({code:'conflict'});
+  expect(h.calls).toHaveLength(1);expect(h.rows.get(session.id)?.messages).toHaveLength(2);
+ });
+ it('returns a valid committed terminal result when Stop arrives after repository commit',async()=>{
+  const h=setup();const session=await h.service.createSession({mode:'assist'});const controller=new AbortController();const save=h.repository.saveSession;
+  h.repository.saveSession=async(...args)=>{const result=await save(...args);controller.abort();return result;};
+  const result=await h.service.turn({...input(session.id),requestId:'committed',signal:controller.signal,onText:()=>{}});
+  expect(result.lastTurnRequestId).toBe('committed');expect(result.messages).toHaveLength(2);expect(h.rows.get(session.id)?.revision).toBe(1);
+ });
+});
