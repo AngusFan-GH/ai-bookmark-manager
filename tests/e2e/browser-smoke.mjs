@@ -203,8 +203,9 @@ try {
  assert.equal(session.messages.length,4);assert.equal(session.messages[1].references[0].citationId,session.messages[3].references[0].citationId);
  assert.equal(session.citations[0].url,'https://example.test/guide?Original=YES#frag');
  const calls=await worker.evaluate(()=>globalThis.__mockCalls);assert.equal(calls.length,2);assert.equal(calls[1].messages.length,4);
- await page.reload();await page.getByRole('button',{name:'历史与恢复',exact:true}).click();
- await page.getByRole('button',{name:/Organize Synthetic Guide/}).click();await page.getByText('Synthetic answer 2',{exact:true}).waitFor();
+ await page.reload();await eventually(async()=>assert.equal(await goal().inputValue(),''));await page.getByRole('button',{name:'历史与恢复',exact:true}).click();
+ await page.getByRole('button',{name:/Organize Synthetic Guide/}).click();await page.getByRole('dialog',{name:'历史与恢复',exact:true}).waitFor({state:'hidden'});
+ assert.equal(await page.getByRole('dialog',{name:'切换对话',exact:true}).count(),0);await page.getByText('Synthetic answer 2',{exact:true}).waitFor();
  pass('visible two-turn AI composer retains full context, exact URL, stable citation and history after reload');
  await page.getByRole('button',{name:'审核整理建议（1）',exact:true}).last().click();
  await page.getByRole('button',{name:'预览已选 AI 建议',exact:true}).click();

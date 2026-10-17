@@ -201,7 +201,7 @@ onMounted(async()=>{
   await run(async()=>{await refresh();if(!store.stats.lastSync){await store.sync();await refresh();}settings.value=await workspace.getAssistantSettings();if(settings.value.onboardingCompleted===false){onboarding.value=true;settingsOpen.value=true;}else if(window.location.hash==='#settings'||new URLSearchParams(window.location.search).get('settings')==='ai')settingsOpen.value=true;sessions.value=await workspace.listSessions();
     const params=new URLSearchParams(window.location.search);const capture=params.get('capture');const sessionId=params.get('session');
     if(capture){const captured=await workspace.getCapture(capture);if(captured){initialBookmark.value=captured;editorKind.value='bookmark';editorOpen.value=true;}else error.value='此收藏草稿已过期，请从原网页重新点击收藏，或手动输入网址。';}
-    if(sessionId){session.value=await workspace.getSession(sessionId);section.value='conversation';}
+    if(sessionId){session.value=await workspace.getSession(sessionId);prompt.value='';section.value='conversation';}
   });
   document.addEventListener('visibilitychange',visibility);window.addEventListener('hashchange',hashChange);
 });
